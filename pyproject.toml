@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=64", "setuptools-scm>=8"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "amd-kernels"
+dynamic = ["version"]
+description = "FlyDSL kernels for AMD gfx950 (MI355X), called directly by model code"
+readme = "README.md"
+requires-python = ">=3.12"
+# not published to PyPI yet: PyPI refuses an upload with a "Private ::" classifier
+classifiers = ["Private :: Do Not Upload"]
+# torch, AITER and FlyDSL >= 0.5.0 come from the environment (README, Requirements); pip must not replace them, so
+# none is declared.
+dependencies = []
+
+[tool.setuptools.packages.find]
+include = ["amd_kernels*"]
+
+[tool.setuptools.package-data]
+"*" = ["README.md", "LICENSE"]
+
+[tool.setuptools_scm]
+# Tags are v<YYYYMMDD>.<NN>+<sha7> (.github/workflows/tag-main.yml);
+# without git metadata the version is 0.0.0.
+fallback_version = "0.0.0"

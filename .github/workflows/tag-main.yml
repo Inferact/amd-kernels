@@ -1,0 +1,53 @@
+# Every commit that lands on main (a merged PR) gets the tag v<YYYYMMDD>.<NN>+<sha7>: the commit's UTC date,
+# NN its place among that day's commits on main's first-parent line (00 = the day's first merge), and its hash as
+# the PEP 440 local label, so the tag is a pip version (pip reports <YYYYMMDD>.<N>+<sha7>; an all-digit hash is read
+# as a number, so pip drops its leading zeros: tag +0123456, pip +123456). Tags of the form v0.0.<YYYYMMDD>.<NN>+g<sha7>
+# also count as tagged; the v<YYYYMMDD> tags sort above them.
+# NN comes from the history, not from counting tags, so two merges close together never get the same number and a
+# re-run gives the same tag. On a pull request the job only prints the tag its merge commit would get.
+# A main commit is tagged as soon as it lands: the PR's own `kernel tests` run is the check before the merge (waiting
+# for main's kernel-tests run would delay a tag by 5-10 min plus the queue for a free 8-GPU node).
+name: tag main
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: tag-main-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  tag:
+    runs-on: ubuntu-latest
+    env:
+      TZ: UTC
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # main's first-parent history and the tags
+      - name: Tag the commit
+        run: |
+          set -euo pipefail
+          sha=$(git rev-parse HEAD)
+          day=$(git log -1 --format=%cd --date=format-local:%Y%m%d HEAD)
+          n=$(git log --first-parent --format=%cd --date=format-local:%Y%m%d HEAD | grep -c "^${day}$")
+          tag=$(printf 'v%s.%02d+%s' "$day" $((n - 1)) "${sha:0:7}")
+          if [[ "$GITHUB_EVENT_NAME" != push ]]; then
+            echo "dry run: the merge commit of this PR would be tagged like $tag" | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          if git tag --points-at HEAD | grep -qE '^v(0\.0\.)?[0-9]{8}\.'; then
+            echo "already tagged: $(git tag --points-at HEAD | grep -E '^v(0\.0\.)?[0-9]{8}\.')" | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "$tag" -m "main at ${sha:0:7}" HEAD
+          git push origin "refs/tags/$tag"
+          echo "tagged $tag" | tee -a "$GITHUB_STEP_SUMMARY"

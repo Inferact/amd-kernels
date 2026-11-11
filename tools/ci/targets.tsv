@@ -1,0 +1,57 @@
+# CI targets that differ from the default: every tests/<category>/<entry>/test_*.py file is one target (one pytest
+# process) on 1 GPU. Columns (tab-separated): path, GPUs, command. path = an entry (the row applies to each of its
+# test files, or, with a command, the entry runs as that one target) or one test file (tests/<path>). The command
+# runs from the repository root inside tools/enroot_test.sh, through bash -c; empty = `python3 -m pytest tests/<path> -q`.
+# Multi-GPU tests skip themselves when fewer GPUs are visible; the rows below give them their GPUs.
+# GPUs = skip leaves the path out of CI (the third column says why).
+# GPUs = compile: a compile test in compile-only mode (tests/compile_only.py); up to 8 share one card (ci.py).
+# precompile (4th column): `same` = the target's own command, or a command (a multi-rank test: the warm-up its
+# ranks run), run first in compile-only mode on the shared card in the target's tree; the target then starts warm.
+# Its exit code is not checked (tests fail in compile-only mode). For targets whose time is mostly compile.
+# No pytest-xdist `-n` in a target's command: its workers would share the target's card, and each card runs one
+# target alone (ci.py). A precompile command may use `-n`: it runs on the shared compile card, which runs only
+# compile-only work, and FlyDSL compiles in parallel only in separate processes (it holds the GIL).
+indexer/indexer_nvfp4_d128_p128_top16/test_split4_rank_owned_ranks4.py	4
+
+collectives/pull_collectives_ranks4/test_slots4_reduce_scatter.py	4
+collectives/all_gather_sampler_i64_c8_ranks4/test_sampler_gather.py	4
+collectives/all_gather_i64_c7_ranks4/test_i64_c7_gather.py	4
+norm/allreduce_gemma_bf16_mxfp8_h6144	4
+embedding/vocab_gather_h6144	4
+gemm/bf16_concat_linear_n1536_k30720/test_gather.py	4
+gemm/bf16_concat_linear_n1536_k30720/test_compile.py	4
+embedding/vocab_gather_gemma_mxfp8_h6144	4
+collectives/pull_collectives_ranks4/test_norm_gather_h6144.py	4
+collectives/pull_collectives_ranks4/test_unpack_q2048_shuffled.py	4
+collectives/seq_parallel_handoffs_h6144_q2048_ranks4/test_handoffs.py	4
+collectives/sdma_push_ranks4/test_transport.py	4
+collectives/seq_parallel_handoffs_h6144_q2048_ranks4/test_warm_up.py	4
+collectives/seq_parallel_handoffs_h6144_q2048_ranks4/test_shard.py	4
+norm/gemma_add_rmsnorm_h6144/test_stream_hoist_weight.py	4
+norm/gemma_add_rmsnorm_h6144/test_staged_ar_add_rmsnorm.py	4
+norm/gemma_add_rmsnorm_h6144/test_oneshot_pull_ack.py	4
+collectives/pull_collectives_ranks4/test_all_gather.py	4
+collectives/all_to_all_bf16_n50016_ranks4/test_exchange.py	4
+gemm/bf16_n50016_k6144/test_publish.py	4		python3 -c "import tests, torch; from amd_kernels.gemm.bf16_n50016_k6144 import warmup_bf16_gemm_n50016_k6144 as w; w(torch.device('cuda'), True)"
+norm/gemma_add_rmsnorm_h6144/test_decoder_ar_norm.py	4
+norm/gemma_add_rmsnorm_h6144/test_decoder_tail_ranks4.py	4
+norm/gemma_add_rmsnorm_h6144/test_slots4_ar_add_rmsnorm.py	4
+norm/gemma_add_rmsnorm_h6144/test_slots4_lossless.py	4
+
+# compile tests: compile-only mode, sharing one card (the same FlyDSL compiles, kernel and cache key, as a normal run)
+attention/norm_rope_fp8_insert_d128_rot64/test_compile.py	compile
+attention/norm_rope_nvfp4_insert_d128_rot64_p128/test_compile.py	compile
+attention/nvfp4_sparse_decode_gqa16_d128_p128_top16/test_compile.py	compile
+attention/nvfp4_sparse_prefill_gqa16_d128_p128_top16/test_compile.py	compile
+attention/swa_decode_fp8kv_gqa16_d128/test_compile.py	compile
+gemm/mxfp8_common/test_compile.py	compile
+indexer/indexer_nvfp4_d128_p128_top16/test_compile.py	compile
+moe/mxfp4_h6144_i768_e128_top4/test_compile_entry.py	compile
+norm/gemma_add_rmsnorm_h6144/test_compile.py	compile
+
+# precompiled targets: their cold time is mostly compile (cold -> warm: test_moe 528 -> 21 s, test_gemm 347 -> 15,
+# test_dispatch 194 -> 8 (AITER's hipcc build of its CK module), test_publish 178 -> 17)
+gemm/bf16_n50016_k6144/test_gemm.py	1		same
+attention/nvfp4_sparse_decode_gqa16_d128_p128_top16/test_index_decode_ranks4.py	4
+sampling/batch_sharded_markov_v200064_h6144_r256_ranks4/test_batch_sharded.py	4
+decoder/dense_mxfp8_h6144_i3072_ranks4/test_decoder_ranks4.py	4

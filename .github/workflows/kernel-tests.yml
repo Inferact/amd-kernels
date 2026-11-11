@@ -1,0 +1,70 @@
+# The kernel tests on MI355X: a pull request runs the entries it touches (a change to shared files runs all of
+# them), main and the nightly run run every entry. The job runs on a self-hosted runner on a Slurm submit host of an
+# MI355X cluster, which submits one 8-GPU Slurm job and waits for it (tools/ci/run_tests.sh).
+# Either cluster passing is enough: this workflow and kernel-tests-mi350x.yml each post the commit status
+# `kernel-tests` (the required check) when they pass; a failing one posts nothing.
+# Site configuration comes from the repository's Actions variables (vars.*): AKR_CI_ROOT, AKR_CI_SCRATCH,
+# AKR_CI_PARTITION, ENROOT_TEST_SCRATCH, AKR_IMAGE, AKR_IMAGE_URL, AKR_IMAGE_SHA256 (tools/ci/run_tests.sh,
+# tools/ci/node_job.sh, tools/enroot_test.sh).
+name: kernel tests
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  schedule:
+    - cron: "0 18 * * *"  # 18:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  statuses: write  # the kernel-tests status
+
+concurrency:
+  group: kernel-tests-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  kernel-tests-mi355x:
+    runs-on: [self-hosted, mi355x-slurm]  # the runner must carry the label mi355x-slurm
+    timeout-minutes: 240  # the queue wait for a free node counts here
+    env:
+      CLUSTER: MI355X
+      AKR_CI_ROOT: ${{ vars.AKR_CI_ROOT }}
+      AKR_CI_SCRATCH: ${{ vars.AKR_CI_SCRATCH }}
+      AKR_CI_PARTITION: ${{ vars.AKR_CI_PARTITION }}
+      ENROOT_TEST_SCRATCH: ${{ vars.ENROOT_TEST_SCRATCH }}
+      AKR_IMAGE: ${{ vars.AKR_IMAGE }}
+      AKR_IMAGE_URL: ${{ vars.AKR_IMAGE_URL }}
+      AKR_IMAGE_SHA256: ${{ vars.AKR_IMAGE_SHA256 }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2  # a pull request's merge commit and its first parent (main)
+      # exec: on a cancel the runner signals the step's shell only, so run_tests.sh must be that process for its trap
+      # to scancel the job (as a child it gets SIGKILL and the job runs on)
+      - name: Run the kernel tests in an 8-GPU Slurm job
+        run: |
+          if [[ "$GITHUB_EVENT_NAME" == pull_request ]]; then
+            exec tools/ci/run_tests.sh changed HEAD^1
+          else
+            exec tools/ci/run_tests.sh all
+          fi
+      - name: Mark the commit passed (kernel-tests status)
+        if: success()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ github.event.pull_request.head.sha || github.sha }}  # protection checks a PR's head
+        run: |
+          printf '{"state":"success","context":"kernel-tests","description":"passed on %s","target_url":"%s/%s/actions/runs/%s"}' \
+            "$CLUSTER" "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID" \
+            | curl -fsS -X POST -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
+                "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/statuses/$SHA" --data @- > /dev/null
+      - name: Cancel the Slurm job of a cancelled run
+        if: cancelled()
+        run: |
+          for f in "${AKR_CI_ROOT:?}"/runs/*-"$GITHUB_RUN_ID"/slurm_job_id; do
+            [[ -f $f ]] && scancel "$(cat "$f")" && echo "scancel $(cat "$f")"
+          done
+          true

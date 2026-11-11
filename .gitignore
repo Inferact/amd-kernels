@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+# Virtual environments and compile caches
+.venv*/
+.deps*/
+.cache*/
+
+# pip builds
+*.egg-info/
+build/
+dist/
