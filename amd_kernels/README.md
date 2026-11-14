@@ -21,6 +21,8 @@ One line per kernel package. Each package's README has what it does, its entry p
 
 - [`moe/mxfp4_h6144_i768_e128_top4`](moe/mxfp4_h6144_i768_e128_top4/README.md): routed MXFP4 experts (A4W4) with the
   MXFP8 shared expert.
+- [`moe/mega_moe_tp`](moe/mega_moe_tp/README.md): the tensor-parallel MXFP4 MoE layer as one persistent kernel
+  (all-gather / all-reduce, both GEMMs, reduce-scatter), and SpRsNorm.
 
 ## Attention
 
