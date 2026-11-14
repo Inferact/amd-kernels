@@ -55,3 +55,4 @@ gemm/bf16_n50016_k6144/test_gemm.py	1		same
 attention/nvfp4_sparse_decode_gqa16_d128_p128_top16/test_index_decode_ranks4.py	4
 sampling/batch_sharded_markov_v200064_h6144_r256_ranks4/test_batch_sharded.py	4
 decoder/dense_mxfp8_h6144_i3072_ranks4/test_decoder_ranks4.py	4
+moe/mega_moe_tp	4

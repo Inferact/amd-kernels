@@ -18,7 +18,7 @@ dependencies = []
 include = ["amd_kernels*"]
 
 [tool.setuptools.package-data]
-"*" = ["README.md", "LICENSE"]
+"*" = ["README.md", "LICENSE", "*.csv"]
 
 [tool.setuptools_scm]
 # Tags are v<YYYYMMDD>.<NN>+<sha7> (.github/workflows/tag-main.yml);
