@@ -41,7 +41,6 @@ calls over 4 inputs, median of 20 replays, slowest rank, us per call. No baselin
 ## Tests
 
 ```bash
-cd amd-kernels && source env.sh   # or: PYTHONPATH=$PWD/.cache/flydsl-0.5.0:$PWD
 python3 -m pytest tests/moe/mega_moe_tp -q                       # 4 GPUs; big-M cases need MORI
 python3 benchmarks/moe/mega_moe_tp/benchmark_mega_moe_tp.py      # 4 GPUs
 ```
