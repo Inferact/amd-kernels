@@ -265,6 +265,25 @@ def test_decode_indices_rank_owned_order_past_one_window(ql, strips):
     assert torch.equal(got, topk_reference(blk, nblk_rows, int(seq.max()))[0])
 
 
+# Requests of k whole 64-block chunks give every rank k runs each; a request one block longer gives rank 0 one more.
+# The scorer splits a run into units up to 52 runs per rank, into halves up to 200, else keeps it whole.
+RUN_BOUNDARIES = [(13, 4), (10, 20), (6, 40)]
+
+
+@pytest.mark.parametrize("ql", [4, 8])
+@pytest.mark.parametrize("n,chunks", RUN_BOUNDARIES)
+@pytest.mark.parametrize("longer", [False, True], ids=["even", "rank0_one_run_more"])
+@torch.inference_mode()
+def test_decode_rank_owned_run_count_boundaries(ql, n, chunks, longer):
+    """Per-rank run totals at both sides of each split-mode boundary (52 / 53, 200 / 201, 240), with the ranks on
+    different sides: the scores are bitwise the single-head scorer's and the top-k its reference."""
+    require_gfx950()
+    lens = [chunks * 64 * BLK] * n
+    if longer:
+        lens[0] += BLK
+    _check_decode(lens, ql, n * chunks, 0, 1)
+
+
 @torch.inference_mode()
 def test_decode_rank_owned_long_rows():
     """The fused decode and its top-k on requests of 150K-300K tokens (one or two top-k windows)."""

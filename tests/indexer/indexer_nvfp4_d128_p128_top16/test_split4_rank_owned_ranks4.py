@@ -96,3 +96,53 @@ def test_split4_rank_owned_four_gpus(tmp_path):
                 with open(p) as f:
                     msgs.append(f.read())
         raise AssertionError("\n".join(msgs) or "worker failed") from None
+
+
+def _run_boundary_worker(rank, port):
+    import torch.distributed as dist
+    from amd_kernels import warm_up
+    from amd_kernels.indexer.indexer_nvfp4_d128_p128_top16.split4.host import IndexSplit4RankOwned
+    from .test_split4_rank_owned import _nvfp4_pages, _single_head_scores, _topk_decode_indices
+
+    torch.set_num_threads(1)
+    warm_up.set_auto(True)
+    warm_up.set_workers(1)
+    torch.cuda.set_device(rank)
+    dist.init_process_group('gloo', init_method=f'tcp://127.0.0.1:{port}', rank=rank, world_size=4)
+    ql = 8
+    # (requests, 64-block chunks per request, the first request one block longer): per-rank runs 52, 53 on rank 0
+    # only, 200, 201 on rank 0 only
+    for n, chunks, longer in ((13, 4, 0), (13, 4, 1), (10, 20, 0), (10, 20, 1)):
+        lens = [chunks * 64 * 128 + longer * 128] + [chunks * 64 * 128] * (n - 1)
+        cp = IndexSplit4RankOwned(rank, dist.group.WORLD, torch.device('cuda', rank), n * ql, 8192, ql)
+        cg = torch.Generator(device='cuda').manual_seed(n * chunks + longer)
+        cache = _nvfp4_pages(2048, cg)
+        table = torch.randint(0, 2048, (n, 8192), generator=cg, dtype=torch.int32, device='cuda')
+        q = (torch.randn(n * ql, 4, 128, generator=cg, device='cuda') * .5).to(torch.float8_e4m3fn)
+        seq = torch.tensor(lens, dtype=torch.int32, device='cuda')
+        out = torch.empty(1, n * ql, 16, dtype=torch.int32, device='cuda')
+        graph = None
+        for step in range(3):
+            if step == 0:
+                cp.score_topk(q[:, rank].contiguous(), cache, table, seq, 2, 3, 8192, out, 1 << 20, sharded=False)
+                graph = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(graph):
+                    cp.score_topk(q[:, rank].contiguous(), cache, table, seq, 2, 3, 8192, out, 1 << 20, sharded=False)
+            out.fill_(-7)
+            graph.replay()
+            torch.cuda.synchronize()
+            expected = _single_head_scores(q, cache, table, seq, ql, 2, 3)[rank:rank + 1]
+            want = _topk_decode_indices(expected, seq, ql, False)
+            assert torch.equal(out[0], want), (rank, n, chunks, longer, step)
+    assert warm_up.late_compiles() == 0
+    dist.destroy_process_group()
+
+
+def test_split4_run_count_boundaries_four_gpus():
+    """Per-rank run totals at both sides of the unit / half-run / whole-run boundaries, ranks on different sides,
+    captured in a graph and replayed: the ids equal the single-head scorer's top-16."""
+    require_gfx950()
+    if torch.cuda.device_count() < 4:
+        pytest.skip('needs four GPUs')
+    import torch.multiprocessing as mp
+    mp.spawn(_run_boundary_worker, args=(_free_port(),), nprocs=4, join=True)
