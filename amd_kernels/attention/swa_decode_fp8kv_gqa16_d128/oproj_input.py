@@ -10,14 +10,13 @@ from amd_kernels.warm_up import entry
 
 from . import host as _host
 
-# The MXFP8 epilogue as o_proj's input pays from 8 rows: attention + o_proj per layer, TP4 o_proj 6144 x 2048, graph
-# replay, cold K/V and weights (benchmarks/attention/bench_attn_oproj_mxfp8.py): 7-row query
-# blocks 14-28 rows -2.2 / -6.7%, 49-448 rows -2.6..-6.1%, 7 rows +1.3%.
+# The MXFP8 epilogue as o_proj's input pays from 8 rows: attention + o_proj -2..-7% at 12-448 rows, -0.1..+5% below 8
+# (TP4: benchmarks/attention/bench_attn_oproj_mxfp8.py, TP2: swa_decode_fp8kv_gqa16_d128/benchmark_oproj_input.py).
 MXFP8_MIN_ROWS = 8
 # The query blocks whose MXFP8 epilogue the tests cover (tests/.../test_oproj_input.py, 1-64 requests): the 7-row and
 # the 3-row block (the 3-row kernels need the native fptrunc bf16 pack).
 MXFP8_QUERY_ROWS = (3, 7)
-# The request counts the warm-up walks (the TP4 draft serves up to 256 requests per rank).
+# The request counts the warm-up walks (the draft serves up to 256 requests per rank).
 MAX_REQS = 256
 
 

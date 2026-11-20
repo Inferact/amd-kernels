@@ -237,6 +237,7 @@ def bench_prefill(heads, q_lens, seq_lens, label):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--prefill", action="store_true")
+    ap.add_argument("--heads", type=int, default=1, help="index heads per GPU (TP4 1, TP2 2)")
     args = ap.parse_args()
     dev = torch.cuda.get_device_properties(0)
     print(
@@ -254,12 +255,12 @@ def main():
             ([2048], [1 << 20], "2K / 1M"),
             ([3072, 3072, 3072], [203072, 3072, 207872], "3 x 3K / 200K, 3K, 208K"),
         ]:
-            bench_prefill(1, q_lens, seq_lens, label)
+            bench_prefill(args.heads, q_lens, seq_lens, label)
         return
     print("| Heads x rows | Requests | Lengths | Scorer us | Page GB/s | Top-k us | Chain us |")
     print("|---|---:|---|---:|---:|---:|---:|")
     rng = torch.Generator().manual_seed(0)
-    for heads, ql, counts in ((1, 4, (16, 64, 128, 256)),):
+    for heads, ql, counts in ((args.heads, 4, (16, 64, 128, 256)),):
         for n in counts:
             for label, lens in (
                 ("32K", [32768] * n),

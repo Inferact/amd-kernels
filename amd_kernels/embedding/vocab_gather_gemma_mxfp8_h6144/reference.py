@@ -10,11 +10,12 @@ from amd_kernels.norm.gemma_rmsnorm_bf16_mxfp8_h6144.reference import gemma_rmsn
 
 def lookup_reference(ids,weights):
     shard=weights[0].shape[0]
-    safe=ids.clamp(0,4*shard-1).long()
+    vocab=len(weights)*shard
+    safe=ids.clamp(0,vocab-1).long()
     out=torch.cat(weights)[safe].clone()
     bits=out.view(torch.int16)
     bits[(bits&0x7f80)==0]=0
-    out[(ids<0)|(ids>=4*shard)]=0
+    out[(ids<0)|(ids>=vocab)]=0
     return out
 
 def reference(ids,weights,norm_weight,eps=1e-6):

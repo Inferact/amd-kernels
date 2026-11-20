@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the amd-kernels project
 """The decode top-16 of a step in one call: the four-GPU scorer on the rank-owned or replicated index cache
-(``split4.host.IndexSplit4RankOwned.score_topk``) or the one-GPU scorer + top-16
-(``score_decode.nvfp4_index_score_top16``), chosen by request count; the ids are the same on both routes
-(``reference.topk_reference``).
+(``split4.host.IndexSplit4RankOwned.score_topk``, TP4), the two-GPU one on the replicated cache
+(``split2.host.IndexSplit2.score_topk``, TP2) or the one-GPU scorer + top-16 (``score_decode.nvfp4_index_score_top16``),
+chosen by request count; the ids are the same on every route (``reference.topk_reference``).
 """
 
 import torch
@@ -16,6 +16,8 @@ from .score_decode import nvfp4_index_score_rows, nvfp4_index_score_top16
 # 24.30 / 27.92 vs four 25.46 / 26.64; 4 rows x 7 / 8 23.45 / 28.36 vs 24.59 / 24.75
 SPLIT_MIN_REQS = {8: 5, 4: 8}
 WARM_CONTEXT = 65536  # context of the four-GPU route's warm-up calls
+# the two-GPU route from this many requests, by rows per request (the decode block, benchmark_index_decode_ranks2.py)
+SPLIT2_MIN_REQS = {8: 8, 4: 6}
 
 
 def split_min_reqs(query_len: int) -> int:
@@ -40,13 +42,26 @@ def use_split(
     )
 
 
+def use_split2(num_reqs: int, query_len: int, num_index_heads: int, *, split_query_len: int,
+               split_max_rows: int) -> bool:
+    """Whether a step takes the two-GPU route built for ``split_query_len`` rows per request and ``split_max_rows``
+    rows."""
+    return (
+        num_index_heads == 2
+        and query_len == split_query_len
+        and num_reqs * query_len <= split_max_rows
+        and num_reqs >= SPLIT2_MIN_REQS.get(query_len, 1)
+    )
+
+
 class IndexDecodeTop16:
     """The decode top-16 of every (index head, row) on this GPU; built once per process, at the same point on
     every rank when ``group`` is given (a collective: IPC buffers, then the warm-up's launches).
 
     Args:
-        group: the four ranks' gloo group for the four-GPU route, or None (one GPU only). The route needs four
-            ranks and 1-``decode_score.MAX_QL`` rows per request; otherwise ``split_off`` says why it is off.
+        group: the ranks' gloo group for the multi-GPU route, or None (one GPU only). Four ranks: 1 index head and
+            1-``decode_score.MAX_QL`` rows per request; two ranks: 2 index heads and 4 or 8 rows per request
+            (``split2``); otherwise ``split_off`` says why it is off.
         sharded: the index cache holds only this rank's pages (False: the replicated cache).
         warm_up: compile every variant now.
     """
@@ -68,6 +83,7 @@ class IndexDecodeTop16:
         self.query_len, self.max_reqs, self.max_seq_len = query_len, max_reqs, max_seq_len
         self.num_index_heads, self.sharded = num_index_heads, sharded
         self.split = None
+        self.split2 = None
         self.split_off = None if group is not None else "no process group"
         if group is not None:
             import torch.distributed as dist
@@ -76,8 +92,19 @@ class IndexDecodeTop16:
             from .split4.host import WORLD, IndexSplit4RankOwned
 
             world = dist.get_world_size(group)
-            if world != WORLD:
-                self.split_off = f"needs {WORLD} ranks ({world})"
+            if world == 2:
+                from .split2 import kernel as split2_kernel
+
+                reqs = min(split2_kernel.MAX_REQS, max_reqs)
+                if num_index_heads != 2 or query_len not in (4, 8):
+                    self.split_off = f"two ranks need 2 index heads x 4 or 8 rows ({num_index_heads} x {query_len})"
+                else:
+                    from .split2.host import IndexSplit2
+
+                    self.split2 = IndexSplit2(rank, group, self.device, reqs * query_len, score_width(max_seq_len),
+                                              query_len)
+            elif world != WORLD:
+                self.split_off = f"needs 2 or {WORLD} ranks ({world})"
             elif not 1 <= query_len <= decode_score.MAX_QL:
                 self.split_off = f"{query_len} decode rows per request (1-{decode_score.MAX_QL})"
             else:
@@ -89,8 +116,16 @@ class IndexDecodeTop16:
             self.warm_up()
 
     def route(self, num_reqs: int, query_len: int, num_index_heads: int, split: bool = True) -> str:
-        """``"split4"`` or ``"one_gpu"``; ``split`` False keeps one GPU (DBO micro-batches, where no collective
-        orders the four-GPU push)."""
+        """``"split4"``, ``"split2"`` or ``"one_gpu"``; ``split`` False keeps one GPU (DBO micro-batches, where no
+        collective orders the multi-GPU exchange)."""
+        cp2 = self.split2
+        if (
+            split
+            and cp2 is not None
+            and use_split2(num_reqs, query_len, num_index_heads, split_query_len=cp2.query_len,
+                           split_max_rows=cp2.max_rows)
+        ):
+            return "split2"
         cp = self.split
         if (
             split
@@ -119,7 +154,12 @@ class IndexDecodeTop16:
     ) -> None:
         """The top-16 block ids of every decode row; graph-safe (lengths are read on the device)."""
         heads = iq.shape[1]
-        if self.route(seq_lens.shape[0], query_len, heads, split) == "split4":
+        route = self.route(seq_lens.shape[0], query_len, heads, split)
+        if route == "split2":
+            self.split2.score_topk(iq, index_cache, block_table, seq_lens, init_blocks, local_blocks, topk_idx,
+                                   max_seq_len)
+            return
+        if route == "split4":
             self.split.score_topk(
                 iq[:, 0],
                 index_cache,
@@ -168,6 +208,18 @@ class IndexDecodeTop16:
                 score = torch.empty((heads, rows, score_width(ctx)), dtype=torch.float32, device=dev)
                 q_idx, cache, table, seq, init, local = args
                 nvfp4_index_score_rows(q_idx, cache, score, table, seq, init, local, query_len=ql, max_seq_len=ctx)
+            if self.split2 is not None:
+                # a real call on both ranks (the entry's first call compiles every size first)
+                self.split2.score_topk(
+                    torch.zeros((ql, heads, 128), dtype=torch.float8_e4m3fn, device=dev),
+                    ix,
+                    torch.zeros((1, -(-WARM_CONTEXT // BLK)), dtype=torch.int32, device=dev),
+                    torch.full((1,), WARM_CONTEXT, dtype=torch.int32, device=dev),
+                    0,
+                    1,
+                    torch.empty((heads, ql, 16), dtype=torch.int32, device=dev),
+                    self.max_seq_len,
+                )
             if self.split is None or heads != 1:
                 return
             from .split4 import decode_score

@@ -48,6 +48,12 @@ REQUESTS = {
     "kv1_f16_ql1": [1, 16, 64, 128, 256],
     "kv1_f16_ql4": [1, 8, 16, 32, 64, 128],
     "kv1_f16_ql8": [1, 2, 4, 16, 32, 64, 128, 256],
+    "kv2_bf16_ql1": [1, 16, 64, 128],
+    "kv2_bf16_ql4": [1, 2, 4, 8, 16, 32, 64, 128],
+    "kv2_bf16_ql8": [1, 2, 4, 8, 16, 32, 64, 128],
+    "kv2_f16_ql1": [1, 16, 64, 128],
+    "kv2_f16_ql4": [1, 2, 4, 8, 16, 32, 64, 128],
+    "kv2_f16_ql8": [1, 2, 4, 8, 16, 24, 32, 40, 48, 52, 64, 128],
 }
 UNION_BLOCKS = 25  # measured: distinct blocks per 4 query rows
 PAGE_HEAD_BYTES = 2 * 9216  # one KV head's K and V of one page
@@ -142,7 +148,7 @@ def make_calls(config, reqs, calls, seed):
     return shared, per_call
 
 
-def launch(shared, call, quant, splits=None):
+def launch(shared, call, quant, splits=None, tail_splits=None):
     nvfp4_sparse_decode(
         call["q"],
         shared["kv_cache"],
@@ -157,6 +163,7 @@ def launch(shared, call, quant, splits=None):
         quant_out=(call["codes"], call["scales"], 16) if quant else None,
         compute_type=shared["compute"],
         splits=splits,
+        tail_splits=tail_splits,
     )
 
 
@@ -184,15 +191,15 @@ def check(shared, call, quant):
     assert rel < QUANT_REL, rel
 
 
-def timeit_graph(shared, per_call, quant, splits=None, replays=10, rounds=5, warmup=5):
+def timeit_graph(shared, per_call, quant, splits=None, replays=10, rounds=5, warmup=5, tail_splits=None):
     """Median over rounds of the mean time per call (us) of one graph of every call."""
     for call in per_call:
-        launch(shared, call, quant, splits)
+        launch(shared, call, quant, splits, tail_splits)
     torch.cuda.synchronize()
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph):
         for call in per_call:
-            launch(shared, call, quant, splits)
+            launch(shared, call, quant, splits, tail_splits)
     torch.cuda.synchronize()
     for _ in range(warmup):
         graph.replay()
@@ -218,6 +225,9 @@ def main() -> None:
         "--splits", type=int, nargs="*", help="time these explicit split counts too "
         "(the padded grid; the automatic schedule is the first row of each case)"
     )
+    parser.add_argument(
+        "--tail-splits", type=int, nargs="*", help="time the tail grid with these leftover split counts too"
+    )
     args = parser.parse_args()
     props = torch.cuda.get_device_properties(0)
     if "gfx950" not in props.gcnArchName:
@@ -236,7 +246,7 @@ def main() -> None:
                     torch.cuda.synchronize()
                     check(shared, per_call[0], quant)
                     us = timeit_graph(shared, per_call, quant)
-                    splits, _, xcds, _, _, tail = plan(reqs, ql, hkv, compute, quant)
+                    splits, _, xcds, _, _, tail = plan(reqs, ql, hkv, compute, quant)[:6]
                     mb = shared["kv_bytes"] / 1e6
                     rows = [(f"{splits} / {xcds or '-'} / {'yes' if tail else 'no'}", us)]
                     for forced in args.splits or []:
@@ -245,9 +255,15 @@ def main() -> None:
                         check(shared, per_call[0], quant)
                         t = timeit_graph(shared, per_call, quant, forced)
                         rows.append((f"{forced} (forced)", t))
+                    for forced in args.tail_splits or []:
+                        launch(shared, per_call[0], quant, tail_splits=forced)
+                        torch.cuda.synchronize()
+                        check(shared, per_call[0], quant)
+                        t = timeit_graph(shared, per_call, quant, tail_splits=forced)
+                        rows.append((f"tail {forced} (forced)", t))
                     for key, t in rows:
                         print(
-                            f"| {config} | {reqs} | {reqs * ql} | {output} | {key} | {t:.1f} "
+                            f"| {config} | {reqs} | {reqs * ql} | {output} | {key} | {t:.2f} "
                             f"| {mb:.1f} | {shared['kv_bytes'] / t / 1e3:.0f} |",
                             flush=True,
                         )

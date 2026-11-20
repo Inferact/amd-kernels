@@ -10,6 +10,8 @@ Per row of H = 6144 columns every kernel computes:
      in the rank order c, c + 1, c + 2, c + 3 (mod 4), operands and partial sums with denormals flushed to a zero of
      their sign, one RNE rounding (AITER's ``cross_device_reduce_2stage``, built with -fgpu-flush-denormals-to-zero),
      ``allreduce_rows_reference``; the MoE tail first sums each rank's slots, ``slots4_allreduce_reference``;
+   - two-rank all-reduce (``allreduce_add_rmsnorm_ranks2``): ``bf16(ftz(ftz(x0) + ftz(x1)))`` at every row, the same
+     functions with 2 partials (commutative: AITER's one-stage and two-stage results at two ranks);
 2. ``s = fp32(x) + fp32(residual)`` (one fp32 rounding); the residual out is ``bf16(s)``;
 3. ``y = (s * rstd) * (w + 1)``, ``rstd = 1 / sqrt(sum(s^2) / 6144 + eps)`` (Gemma's weight offset; the norm reads
    the fp32 s, not the rounded residual out). The kernels sum the squares in fp32 in the Triton kernels' order; the
@@ -70,15 +72,17 @@ def allreduce_reference(xs: list[torch.Tensor]) -> torch.Tensor:
 
 
 def allreduce_rows_reference(xs: list[torch.Tensor]) -> torch.Tensor:
-    """The 4 ranks' ``[rows, H]`` bf16 partials -> their sum, bf16, at any row count (module docstring, step 1)."""
+    """The ranks' ``[rows, H]`` bf16 partials (4, or 2 for ``allreduce_add_rmsnorm_ranks2``) -> their sum, bf16, at any
+    row count (module docstring, step 1)."""
+    world = len(xs)
     rows = xs[0].shape[0]
-    q = (rows + WORLD - 1) // WORLD
+    q = (rows + world - 1) // world
     out = torch.empty_like(xs[0])
-    for c in range(WORLD):
+    for c in range(world):
         blk = slice(min(c * q, rows), min((c + 1) * q, rows))
         acc = _ftz(xs[c][blk].float())
-        for t in range(1, WORLD):
-            acc = _ftz(acc + _ftz(xs[(c + t) % WORLD][blk].float()))
+        for t in range(1, world):
+            acc = _ftz(acc + _ftz(xs[(c + t) % world][blk].float()))
         out[blk] = acc.bfloat16()
     return out
 
@@ -95,7 +99,7 @@ def slots4_local_reference(slots: torch.Tensor, shared: torch.Tensor) -> torch.T
 def slots4_allreduce_reference(
     slots: list[torch.Tensor], shared: list[torch.Tensor]
 ) -> torch.Tensor:
-    """The 4 ranks' slots and shared outputs -> the all-reduced bf16 rows of ``slots4_ar_add_rmsnorm_mxfp8``: the
+    """The ranks' slots and shared outputs -> the all-reduced bf16 rows of ``slots4_ar_add_rmsnorm_mxfp8``: the
     ranks' ``slots4_local_reference`` partials through ``allreduce_rows_reference`` (1-8191 rows). Its row-major codes
     use the tiled norm's arithmetic; only their addresses change."""
     return allreduce_rows_reference([slots4_local_reference(s, h) for s, h in zip(slots, shared)])

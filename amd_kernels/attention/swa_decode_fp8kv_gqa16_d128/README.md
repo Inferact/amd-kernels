@@ -3,11 +3,11 @@
 ## What it does
 
 Decode attention of a sliding-window layer over an e4m3 KV cache (per-tensor K / V scales), 1-8 query rows per
-request. Caller: the MiniMax-M3.1 DSpark draft (5 sliding layers, window 4096): TP4 16 q / 1 KV heads, 128-token
-pages, 3 or 7 rows per request, causal or not (the upstream draft is non-causal), up to 256 requests.
-`q [rows, 16 Hkv, 128]` bf16; cache `[pages, Hkv, page, 256]` e4m3, 128 K then 128 V bytes per token, page a multiple
-of 32. A request's rows are the last positions of its sequence; row p attends `p - window < k < seq_len` (causal:
-`k <= p`); requests with `seq_len < rows` (graph padding) write nothing. Contract:
+request. Caller: the MiniMax-M3.1 DSpark draft (5 sliding layers, window 4096): TP4 16 q / 1 KV heads and TP2 32 q /
+2 KV heads, 128-token pages, 3 or 7 rows per request, causal or not (the upstream draft is non-causal), up to 256
+requests. `q [rows, 16 Hkv, 128]` bf16; cache `[pages, Hkv, page, 256]` e4m3, 128 K then 128 V bytes per token, page a
+multiple of 32. A request's rows are the last positions of its sequence; row p attends `p - window < k < seq_len`
+(causal: `k <= p`); requests with `seq_len < rows` (graph padding) write nothing. Contract:
 `reference.py`: exact bf16 K / V, bf16 Q and P, fp32 softmax and sums, bf16 output, splits combined in split order
 (deterministic, but the split count follows the request count); the MXFP8 output equals the o_proj quantizer's bytes.
 
@@ -22,12 +22,13 @@ of 32. A request's rows are the last positions of its sequence; row p attends `p
   row's layout (`oproj_codes`) from 8 rows of 3- or 7-row blocks, else the bf16 output. An `amd_kernels.warm_up`
   entry: the first call of a mode (rows, window, causal, heads, page, o_proj N) compiles 1-256 requests.
 
-`host.py` picks the kernel and the splits (`plan_splits`: one round of CUs, a request's splits on one XCD);
-`oproj_input.mxfp8_out` picks the output.
+`host.py` picks the kernel and the splits (TP4: `plan_splits`, one round of CUs, a request's splits on one XCD, and the
+query tiles; TP2: `_TP2_PLANS`); `oproj_input.mxfp8_out` picks the output.
 
 ## Performance
 
 Graph replay of 100 launches with their own queries, block tables and lengths, K / V cold (full windows), us per call.
+TP2 baseline: the request-wide `kernel.py` with its split plan (`plan_splits`).
 
 | Case | Requests -> us |
 |---|---|
@@ -35,10 +36,15 @@ Graph replay of 100 launches with their own queries, block tables and lengths, K
 | TP4 7 rows causal, bf16 | 1 / 2 / 4 / 16 / 32 / 64 -> 9.83 / 10.22 / 11.85 / 23.35 / 33.65 / 46.78 |
 | TP4 3 rows non-causal | 1 / 4 / 16 / 32 / 48 / 64 -> bf16 15.90 / 16.80 / 17.54 / 20.22 / 21.91 / 24.25, MXFP8 16.30 / 17.20 / 17.93 / 20.59 / 22.22 / 24.66 |
 | TP4 4 rows causal, bf16 | 1 / 16 / 64 / 128 / 256 -> 20.55 / 22.83 / 28.86 / 39.75 / 65.70 |
+| TP2 7 rows non-causal, bf16 | 1 / 2 / 4 / 8 / 16 / 24 / 32 / 40 / 48 / 64 / 96 / 128 / 256 -> 9.97 / 11.70 / 14.85 / 18.90 / 27.13 / 30.81 / 34.39 / 37.57 / 42.49 / 47.94 / 69.82 / 81.55 / 163.53 vs baseline 37.57 / 38.37 / 39.08 / 39.34 / 43.87 / 44.96 / 49.48 / 53.26 / 69.46 / 70.40 / 115.10 / 116.11 / 231.14 |
+| TP2 7 rows causal, bf16 | 1 / 4 / 16 / 32 / 48 / 64 / 128 -> 9.95 / 14.86 / 27.36 / 34.32 / 42.52 / 47.85 / 82.12 |
+| TP2 3 rows non-causal, bf16 | 1 / 4 / 16 / 32 / 48 / 64 / 128 -> 12.73 / 14.21 / 17.31 / 21.23 / 26.44 / 32.51 / 52.95 vs baseline 16.11 / 17.07 / 20.03 / 24.18 / 30.50 / 34.06 / 54.73 |
 
 ## Tests
 
 ```bash
 python3 -m pytest tests/attention/swa_decode_fp8kv_gqa16_d128 -q
 python3 benchmarks/attention/swa_decode_fp8kv_gqa16_d128/benchmark_decode.py --case tp4_dspark7_noncausal_p128_bf16
+python3 benchmarks/attention/swa_decode_fp8kv_gqa16_d128/benchmark_decode.py --case tp2_dspark7_noncausal_p128_bf16
+python3 benchmarks/attention/swa_decode_fp8kv_gqa16_d128/benchmark_oproj_input.py
 ```

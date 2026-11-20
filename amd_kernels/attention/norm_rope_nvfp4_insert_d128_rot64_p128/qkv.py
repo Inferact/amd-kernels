@@ -5,14 +5,17 @@ and index-K into their NVFP4 pages.
 
 - ``qkv_norm_rope_nvfp4_insert``: from the bf16 QKV rows (any projection).
 - ``mxfp8_gemm_qkv_norm_rope_nvfp4_insert``: from the MXFP8 codes of the QKV GEMM's input (``gemm.mxfp8_common``'s
-  pre-quantized layout): the one-launch entry ``mxfp8_qkv_norm_rope_nvfp4_insert_n2560_k6144_rot64_p128`` where it
-  applies (N 2560, K 6144, 16 / 1 / 1 heads, rotary 64, bf16, 1-1536 rows in the shuffled-code tile) and
+  pre-quantized layout): the one-launch entry ``mxfp8_qkv_norm_rope_nvfp4_insert_n2560_k6144_rot64_p128`` (N 2560,
+  16 / 1 / 1 heads, 1-1536 rows) or ``..._n4992_k6144_rot64_p128`` (N 4992, 32 / 2 / 2 heads, 1-768 rows) where it
+  applies (K 6144, rotary 64, bf16, rows in the shuffled-code tile) and
   ``one_launch`` allows it; else the GEMM (where the codes are in the shuffled tile, its deferred split-K partials go
   to ``splitk_reduce_norm_rope_nvfp4_insert``) and the insert. Bitwise either way.
 
 ``one_launch=False``: the one-launch entry keeps one cross-workgroup counter set per stream and graph capture (512 per
 device); a caller that captures every layer's segment on its own (breakable PIECEWISE graphs) passes False.
 """
+
+import importlib
 
 import torch
 
@@ -59,12 +62,17 @@ def qkv_norm_rope_nvfp4_insert(
     return q, index_q
 
 
-def _one_launch_entry():
+_ONE_LAUNCH = {
+    (2560, 6144): "amd_kernels.attention.mxfp8_qkv_norm_rope_nvfp4_insert_n2560_k6144_rot64_p128.host",
+    (4992, 6144): "amd_kernels.attention.mxfp8_qkv_norm_rope_nvfp4_insert_n4992_k6144_rot64_p128.host",
+}
+
+
+def _one_launch_entry(n, k):
     try:
-        from amd_kernels.attention.mxfp8_qkv_norm_rope_nvfp4_insert_n2560_k6144_rot64_p128 import host
-    except ImportError:
+        return importlib.import_module(_ONE_LAUNCH[(n, k)])
+    except (KeyError, ImportError):
         return None
-    return host
 
 
 def mxfp8_gemm_qkv_norm_rope_nvfp4_insert(
@@ -103,7 +111,7 @@ def mxfp8_gemm_qkv_norm_rope_nvfp4_insert(
     ins = (q_norm_weight, k_norm_weight, index_q_norm_weight, index_k_norm_weight, cos_sin_cache, positions,
            slot_mapping, index_slot_mapping, kv_cache, index_cache, k_scale, v_scale)
     kw = dict(num_heads=num_heads, num_kv_heads=num_kv_heads, num_index_heads=num_index_heads, eps=eps)
-    f = _one_launch_entry() if one_launch else None
+    f = _one_launch_entry(n, k) if one_launch else None
     if (
         f is not None
         and out_dtype == torch.bfloat16

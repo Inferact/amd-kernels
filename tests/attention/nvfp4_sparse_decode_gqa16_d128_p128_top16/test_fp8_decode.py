@@ -46,7 +46,7 @@ def unit_scales(case):
 @pytest.mark.parametrize(
     "hkv,ql,reqs,splits,xcd",
     [(1, 8, 1, 4, 8), (1, 8, 5, 4, 8), (1, 8, 9, 2, 8), (1, 8, 24, 1, 8), (1, 8, 40, 2, 8), (1, 8, 4, 8, 0),
-     (1, 4, 6, 3, 8)],
+     (1, 4, 6, 3, 8), (2, 8, 1, 4, 8), (2, 8, 3, 1, 8), (2, 8, 9, 2, 8), (2, 8, 20, 1, 8), (2, 4, 6, 3, 8)],
 )
 def test_contract_fp8(hkv, ql, reqs, splits, xcd):
     require_gfx950()

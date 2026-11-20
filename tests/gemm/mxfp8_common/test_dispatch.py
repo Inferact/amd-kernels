@@ -88,7 +88,7 @@ def test_tp4_prefill_rows():
     """The TP4 rows (graph replay A/B on layer 39 rank 0's weights, bitwise-equal outputs):
     QKV (2560, 6144) at 385-1536 (but 513-576) decode rows with 80-column tiles (eight
     row tiles x 32 column tiles = one workgroup per CU); 1537-2048 uses the rectangular
-    128x160 tile, 2049-3072 4-wave NT 128x256, 3073-10240 4-wave NT 256x256; o_proj
+    128x160 tile, 2049-3072 4-wave NT 256x128, 3073-10240 4-wave NT 256x256; o_proj
     (6144, 2048) the rectangular 128x192 tile at 769-1024, 4-wave NT 256x128 at 1025-1280,
     4-wave NT 256x256 at 1281-3328, the persistent 256x192 tile at 3329-3968, the
     AITER row kept at 3969-4096 (no stable eager gain there), 4-wave NT 256x256 at 4097-12288; o_proj_full (6144, 8192, the SP o_proj) the
@@ -122,8 +122,8 @@ def test_tp4_prefill_rows():
     for m in (1537, 1600, 2048):
         assert tile(m, 2560, 6144) == ("rect_n2560_k6144", 128, 160), m
         assert g.prequant_code_tile_rows(m, 2560, 6144, BF16) == 0
-    assert tile(2049, 2560, 6144) == ("4wave_nt", 128, 256)
-    assert tile(3072, 2560, 6144) == ("4wave_nt", 128, 256)
+    assert tile(2049, 2560, 6144) == ("4wave_nt", 256, 128)
+    assert tile(3072, 2560, 6144) == ("4wave_nt", 256, 128)
     for m in (3073, 3584, 4095, 4096, 4097, 4608, 4799, 4800):
         assert tile(m, 2560, 6144) == ("prefill_n2560_k6144_192x256", 192, 256), m
         assert tile(m, 2560, 6144, False) == ("prefill_n2560_k6144_192x256", 192, 256), m

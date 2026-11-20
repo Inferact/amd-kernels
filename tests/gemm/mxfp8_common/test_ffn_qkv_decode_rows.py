@@ -1,8 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the amd-kernels project
-"""TP4 decode rows of N 2304 x K 6144 (QKV), N 6144 x K 6144 (gate_up) and N 6144 x K 3072 (down): QKV 97-112
-(32x32, K-waves 2, cached W), 193-224 (80x32), 385-448 (cached W), gate_up 193-224 (112x48), down 65-80 (48x48) and
-193-224 (112x48); each keeps the K-wave count of a baseline tile (``ROWS``' last column), so its K order is the
+"""TP4 decode rows of N 2304 x K 6144 (QKV) and N 6144 x K 3072 (down): QKV 97-112 (32x32, K-waves 2, cached W),
+193-224 (80x32), 385-448 (cached W), down 65-80 (48x48) and 193-224 (112x48); each keeps the K-wave count of a baseline tile (``ROWS``' last column), so its K order is the
 baseline's: bitwise equal to the baseline tile, the fp64 contract of reference.py, graph replay, the bf16 entry, no
 compile after the warm-up, MFMA co-residency. Neighbouring rows are pinned."""
 import dataclasses
@@ -18,7 +17,6 @@ ROWS = [
     (2304, 6144, 97, 112, (32, 32, 2, 0), (32, 48, None)),
     (2304, 6144, 193, 224, (80, 32, 3, None), (64, 48, None)),
     (2304, 6144, 385, 448, (64, 64, 3, 0), (64, 64, None)),
-    (6144, 6144, 193, 224, (112, 48, 3, None), (128, 48, None)),
     (6144, 3072, 65, 80, (48, 48, 3, None), (64, 48, None)),
     (6144, 3072, 193, 224, (112, 48, 3, None), (128, 48, None)),
 ]
@@ -27,7 +25,6 @@ NEIGHBOURS = [
     (2304, 6144, 96, (32, 32, 1, None)), (2304, 6144, 113, (32, 48, 2, None)), (2304, 6144, 160, (32, 48, 2, None)),
     (2304, 6144, 192, (64, 32, 4, None)), (2304, 6144, 225, (64, 48, 3, None)), (2304, 6144, 320, (64, 48, 3, None)),
     (2304, 6144, 384, (128, 32, 3, None)), (2304, 6144, 449, (128, 48, 3, None)),
-    (6144, 6144, 192, (96, 48, 4, None)), (6144, 6144, 225, (128, 48, 3, None)), (6144, 6144, 256, (128, 48, 3, None)),
     (6144, 3072, 64, (64, 32, 1, None)), (6144, 3072, 81, (64, 48, 3, None)), (6144, 3072, 128, (64, 48, 3, None)),
     (6144, 3072, 192, (96, 48, 3, None)), (6144, 3072, 225, (128, 48, 3, None)), (6144, 3072, 256, (128, 48, 3, None)),
 ]

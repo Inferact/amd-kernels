@@ -11,9 +11,9 @@ that produced them leaves them in serving. Median of 5 rounds of 10 replays, µs
 launch; GB/s counts the input read plus the cache bytes written. The first and the
 last launch are checked against ``reference.py`` before timing.
 
-Cases (README): an M3.1 draft layer at TP4 (16 query / 1 KV heads, 5 layers, 128-token
-pages); the qkv kernel at the draft's query block (R requests x 4 rows), the multi-layer
-kernel at context-row counts from a decode step to a prefill chunk.
+Cases (README): an M3.1 draft layer at TP4 (16 query / 1 KV heads) and TP2 (32 query / 2 KV heads), 5 layers,
+128-token pages; the qkv kernel at the draft's query block (R requests x 4 rows), the multi-layer kernel at
+context-row counts from a decode step to a prefill chunk.
 """
 
 import argparse
@@ -39,9 +39,11 @@ CS_ROWS = 65536
 INPUT_BUDGET = 4 << 30
 QKV_CASES = [
     ("qkv_tp4_p128", 16, 1, 128, [4, 64, 256, 1024]),
+    ("qkv_tp2_p128", 32, 2, 128, [4, 64, 256, 1024, 2048]),
 ]
 ML_CASES = [
     ("multilayer_tp4_p128", 1, 128, [4, 384, 4096]),
+    ("multilayer_tp2_p128", 2, 128, [4, 384, 4096, 8192]),
 ]
 
 
@@ -161,16 +163,17 @@ def bench_multilayer(name, nkv, page, n, wanted):
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--copies", type=int, default=100, help="launches (inputs) per graph, at most")
+    parser.add_argument("--case", nargs="*", default=[c[0] for c in QKV_CASES + ML_CASES])
     args = parser.parse_args()
     if not torch.cuda.is_available() or "gfx950" not in torch.cuda.get_device_properties(0).gcnArchName:
         raise RuntimeError("requires gfx950")
     scales = torch.tensor(1.0, device="cuda"), torch.tensor(1.3, device="cuda")
     with torch.inference_mode():
         for name, nq, nkv, page, ns in QKV_CASES:
-            for n in ns:
+            for n in ns if name in args.case else ():
                 bench_qkv(name, nq, nkv, page, n, args.copies, scales)
         for name, nkv, page, ns in ML_CASES:
-            for n in ns:
+            for n in ns if name in args.case else ():
                 bench_multilayer(name, nkv, page, n, args.copies)
 
 

@@ -25,19 +25,25 @@ import statistics
 import torch
 
 from amd_kernels.attention.nvfp4_sparse_prefill_gqa16_d128_p128_top16 import nvfp4_sparse_prefill, reference
-from tests.attention.nvfp4_sparse_prefill_gqa16_d128_p128_top16.cases import BLOCK, GROUP, HEAD_DIM, SM_SCALE, TP4_HKV, shared_picks
+from tests.attention.nvfp4_sparse_prefill_gqa16_d128_p128_top16.cases import (
+    BLOCK, GROUP, HEAD_DIM, SM_SCALE, TP2_HKV, TP4_HKV, shared_picks,
+)
 
 PREFIX = 16384
 N_INPUTS = 100
 # Q + outputs of all inputs of a case; the largest steps get fewer than 100 inputs
 # (each of their calls already moves more than 256 MB)
 BUDGET_BYTES = 64 * 1024**3
-# (KV heads, prefill tokens per step): TP4 up to 65536 tokens
+# (KV heads, prefill tokens per step): TP4 and TP2 up to 65536 tokens
 CASES = [
     (TP4_HKV, 1024),
     (TP4_HKV, 4096),
     (TP4_HKV, 16384),
     (TP4_HKV, 65536),
+    (TP2_HKV, 256),
+    (TP2_HKV, 512),
+    (TP2_HKV, 2048),
+    (TP2_HKV, 32768),
 ]
 
 

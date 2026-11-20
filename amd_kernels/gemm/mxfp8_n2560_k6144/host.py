@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the amd-kernels project
 """The MXFP8 GEMM rows and kernels of the QKV projection N 2560 x K 6144 (TP4), registered with the common
-dispatcher (``gemm.mxfp8_common.gemm._SHAPE_HOSTS``): its windows ahead of the tuned table, the producer rows of
+dispatcher (``gemm.mxfp8_common.gemm._SHAPE_HOSTS``): its windows ahead of ``ROWS``, the producer rows of
 pre-quantized codes, the deferred (split-K partial) rows of the fused norm / RoPE / insert chain, and the
 launches of its two kernels (``rect_128x160``, ``prefill_192x256``)."""
 
@@ -9,14 +9,14 @@ import functools
 
 import torch
 
-from amd_kernels.gemm.mxfp8_common.gemm import _DECODE_KERNEL, _Config
+from amd_kernels.gemm.mxfp8_common.gemm import _Config, _DECODE_KERNEL, parse_rows, select_from_rows
 
 _RECT_N2560_K6144_KERNEL = "rect_n2560_k6144"
 _PREFILL_N2560_K6144_192_KERNEL = "prefill_n2560_k6144_192x256"
 
 
-def select(m: int, out_dtype: torch.dtype, allow_decode: bool) -> _Config | None:
-    """The rows ahead of the tuned table (``_select_config``), or None."""
+def _select_own(m: int, out_dtype: torch.dtype, allow_decode: bool) -> _Config | None:
+    """The rows ahead of ``ROWS`` (``_select_config``), or None."""
     # A 192-row tile fills the CU round without a second round of 128-row tiles.
     if out_dtype == torch.bfloat16 and 3073 <= m <= 4800:
         return _Config(192, 256, 128, 1, 1, 1, _PREFILL_N2560_K6144_192_KERNEL, 2, 2)
@@ -113,3 +113,70 @@ LAUNCHERS = {
     _PREFILL_N2560_K6144_192_KERNEL: lambda config, a, sa, w, sw, out: _launch_prefill_n2560_k6144_192(a, sa, w, sw, out),
     _RECT_N2560_K6144_KERNEL: lambda config, a, sa, w, sw, out: _launch_rect_n2560_k6144(a, sa, w, sw, out),
 }
+
+
+# This shape's rows. Measured bf16 rows at 385-1536 (except 513-576) and 1537-4096 (graph replay, one MI355X).
+ROWS = parse_rows("""\
+M,N,K,out_dtype,kernel,tile_m,tile_n,tile_k,waves_m,waves_n,waves_per_eu,xcd_swizzle,split_k,la_w,la_a,min_m,w_cm
+1,2560,6144,any,aiter,32,64,128,0,0,0,0,12,,
+4,2560,6144,any,aiter,32,64,128,0,0,0,0,12,,
+16,2560,6144,any,aiter,32,32,256,0,0,0,0,4,,
+64,2560,6144,any,aiter,64,64,256,0,0,0,0,4,,
+128,2560,6144,any,aiter,64,64,256,0,0,0,0,6,,
+192,2560,6144,any,aiter,64,64,256,0,0,2,4,4,,
+256,2560,6144,any,aiter,64,64,256,0,0,2,4,3,,
+320,2560,6144,any,aiter,128,64,256,0,0,2,4,4,,
+384,2560,6144,any,aiter,128,64,256,0,0,2,4,4,,
+512,2560,6144,any,aiter,128,64,256,0,0,2,4,3,,
+640,2560,6144,any,aiter,128,64,256,0,0,2,4,2,,
+768,2560,6144,any,aiter,128,64,256,0,0,2,4,2,,
+1024,2560,6144,any,aiter,128,64,256,0,0,2,4,1,,
+4096,2560,6144,any,aiter,128,128,128,0,0,0,0,1,,
+8192,2560,6144,any,aiter,128,128,256,0,0,0,0,1,,
+8224,2560,6144,any,aiter,128,256,128,0,0,0,0,1,,
+10240,2560,6144,any,aiter,128,256,128,0,0,2,4,1,,
+12288,2560,6144,any,aiter,128,256,128,0,0,2,4,1,,
+14336,2560,6144,any,aiter,128,256,128,0,0,2,4,1,,
+16384,2560,6144,any,aiter,128,256,128,0,0,2,4,1,,
+18432,2560,6144,any,aiter,128,256,128,0,0,2,4,1,,
+20480,2560,6144,any,aiter,128,256,128,0,0,2,4,1,,
+22528,2560,6144,any,aiter,128,256,128,0,0,2,4,1,,
+24576,2560,6144,any,aiter,128,256,128,0,0,2,4,1,,
+26624,2560,6144,any,aiter,128,256,128,0,0,2,4,1,,
+28672,2560,6144,any,aiter,128,256,128,0,0,2,4,1,,
+30720,2560,6144,any,aiter,128,256,128,0,0,0,0,1,,
+32768,2560,6144,any,aiter,128,256,128,0,0,2,4,1,,
+4,2560,6144,bf16,decode_fq,4,16,128,3,0,0,0,1,8,2
+8,2560,6144,bf16,decode_fq,8,16,128,2,0,0,0,1,8,4
+16,2560,6144,bf16,decode,16,16,128,4,0,0,0,1,11,11
+32,2560,6144,bf16,decode,32,32,128,1,0,0,0,3,,
+64,2560,6144,bf16,decode,32,64,128,1,0,0,0,3,,
+96,2560,6144,bf16,decode,32,32,128,2,0,0,0,1,,
+128,2560,6144,bf16,decode,64,32,128,3,0,0,0,1,,
+192,2560,6144,bf16,decode,64,32,128,4,0,0,0,1,,
+288,2560,6144,bf16,decode,96,32,128,4,0,0,0,1,,
+384,2560,6144,bf16,decode,64,64,128,3,0,0,0,1,,
+512,2560,6144,bf16,decode,64,80,128,3,0,0,0,1,,,,0
+576,2560,6144,bf16,decode,96,64,128,3,0,0,0,1,,
+640,2560,6144,bf16,decode,80,80,128,4,0,0,0,1,,,,0
+768,2560,6144,bf16,decode,96,80,128,3,0,0,0,1,,,,0
+896,2560,6144,bf16,decode,112,80,128,3,0,0,0,1,,,,0
+1024,2560,6144,bf16,decode,128,80,128,3,0,0,0,1,,,,0
+1152,2560,6144,bf16,decode,144,80,128,3,0,0,0,1,,,,0
+1280,2560,6144,bf16,decode,160,80,128,3,0,0,0,1,,,,0
+1408,2560,6144,bf16,decode,176,80,128,3,0,0,0,1,,,,0
+1536,2560,6144,bf16,decode,192,80,128,3,0,0,0,1,,,,0
+2048,2560,6144,bf16,4wave,128,256,128,2,2,1,1,1,,
+3072,2560,6144,bf16,4wave_nt,256,128,128,2,2,1,1,1,,
+4096,2560,6144,bf16,4wave_nt,256,256,128,2,2,1,1,1,,
+10240,2560,6144,bf16,4wave_nt,256,256,128,2,2,1,1,1,,
+65536,2560,6144,bf16,4wave,256,256,128,2,2,1,1,1,,
+""")
+
+
+def select(m: int, out_dtype: torch.dtype, allow_decode: bool) -> _Config | None:
+    """This shape's row for ``m``: its own kernels' windows (``_select_own``), else ``ROWS``."""
+    config = _select_own(m, out_dtype, allow_decode)
+    if config is not None:
+        return config
+    return select_from_rows(ROWS, m, 2560, 6144, out_dtype, allow_decode)

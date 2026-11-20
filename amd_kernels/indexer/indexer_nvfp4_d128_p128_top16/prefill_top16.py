@@ -23,6 +23,8 @@ MAX_SEQ_LEN = 1 << 20  # the top-k's 8192 blocks
 # scorer's 128-row tiles), at MAX_SEQ_LEN the 512-row tiles.
 WARM_ROWS = 512
 WARM_CONTEXTS = tuple(s * 64 * BLK for s in PREFILL_STRIPS) + (MAX_SEQ_LEN,)
+# two heads: also 64 rows (the 128-row tiles; 512 rows take the 256-row tiles there)
+WARM_TINY = 64
 
 
 def index_prefill_top16_blocker(
@@ -90,7 +92,7 @@ def _mode(iq, *args, **kwargs):
 
 
 def _sizes(mode):
-    return WARM_CONTEXTS
+    return ((WARM_TINY,) if mode[0] == 2 else ()) + WARM_CONTEXTS
 
 
 def _call(heads: int, n: int, device):
@@ -122,7 +124,7 @@ index_prefill_top16 = entry(
 
 def warm_up(device, num_index_heads: int) -> None:
     """Before serving: one small call, whose first-call warm-up compiles every variant of ``num_index_heads`` heads
-    on ``device`` (``WARM_CONTEXTS``); nothing at a head count the entry does not serve."""
+    on ``device`` (``_sizes``); nothing at a head count the entry does not serve."""
     if num_index_heads not in INDEX_HEADS:
         return
     with torch.inference_mode():

@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the amd-kernels project
-"""Four contiguous vocabulary shards, each [V,6144] bf16, to [M,6144].
+"""Two or four contiguous vocabulary shards, each [V,6144] bf16, to [M,6144].
 
 Read shard token//V, local row token%V. Invalid IDs produce positive zero.
 Bf16 subnormals and signed zeros become positive zero, as when AITER adds the

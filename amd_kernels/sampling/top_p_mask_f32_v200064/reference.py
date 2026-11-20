@@ -266,6 +266,8 @@ def top_p_mask_reference(logits: torch.Tensor, p: torch.Tensor, debug: dict | No
     set). ``debug`` gets the slice stats and every round's slice partials (Triton's STATS / PARTS layout) and the
     rounds each row ran."""
     n = logits.shape[0]
+    if n > SPLIT_MAX_BATCH:
+        return top_p_mask_rows_reference(logits, p, debug)
     assert logits.dtype == torch.float32 and logits.shape[1] == V and 1 <= n <= SPLIT_MAX_BATCH
     S = splits_for(n)
     L = V // S
@@ -325,3 +327,199 @@ def top_p_mask_reference(logits: torch.Tensor, p: torch.Tensor, debug: dict | No
         keep_dup = dmask & (rank <= col(st.numkeep))
         keep = torch.where(ties, keep & (~dmask | keep_dup), keep)
     return torch.where(masked & ~keep, torch.full_like(x, float("-inf")), x)
+
+
+# ---- more than 64 rows: vLLM's one-program-per-row kernel (``_topk_topp_kernel``, top-p only)
+
+TILE, CHUNK = 8192, 4096
+TILES = -(-V // TILE)  # 25
+# a 4096-chunk of the compacted buffer: thread (c % 2048) // 4, register 4 (c // 2048) + c % 4
+CHUNK_OFFSETS = (2, 2048, 1, 32, 16, 8, 4, 64, 128, 1024, 512, 256)
+ITERS = 18
+EPS = _f32(1e-9)
+
+
+def fma32(a: torch.Tensor, b: torch.Tensor, c: torch.Tensor) -> torch.Tensor:
+    """fp32 ``a * b + c`` with one rounding, elementwise (the product is exact in fp64, the sum's error is kept by
+    TwoSum and decides a tie of the fp32 rounding)."""
+    a, b, c = torch.broadcast_tensors(a.double(), b.double(), c.double())
+    pr = a * b
+    s = pr + c
+    bv = s - pr
+    err = (pr - (s - bv)) + (c - bv)
+    r = s.float()
+    up = torch.nextafter(r, torch.full_like(r, float("inf")))
+    dn = torch.nextafter(r, torch.full_like(r, float("-inf")))
+    r = torch.where((s == (r.double() + up.double()) / 2) & (err > 0), up, r)
+    r = torch.where((s == (r.double() + dn.double()) / 2) & (err < 0), dn, r)
+    return torch.where(torch.isfinite(s), r, s.float())
+
+
+def sqrt_f32(x: torch.Tensor) -> torch.Tensor:
+    """Triton's ``tl.sqrt`` on gfx950: the hardware ``v_sqrt_f32`` (not correctly rounded: it differs from torch's
+    sqrt by one ulp on about 15% of inputs), run elementwise on the GPU."""
+    from .kernel_rows import compile_sqrt_f32
+
+    x = x.float().contiguous()
+    y = torch.empty_like(x)
+    if x.numel():
+        exe = _sqrt_exe(compile_sqrt_f32)
+        _run(exe, x.data_ptr(), y.data_ptr(), x.numel(), -(-x.numel() // 256), torch.cuda.current_stream())
+    return y
+
+
+def _sqrt_exe(factory, _cache={}):
+    if "exe" not in _cache:
+        _cache["exe"] = factory()
+    return _cache["exe"]
+
+
+def _run(exe, *args):
+    import flydsl.compiler as flyc
+
+    cf = getattr(exe, "_cf", None)
+    if cf is None:
+        exe._cf = flyc.compile(exe, *args)
+    else:
+        cf(*args)
+
+
+def log_any_f32(x: torch.Tensor) -> torch.Tensor:
+    """``tl.log`` for any x: below 2^-126 (zero and negatives too) the input is scaled by 2^32 and 32 ln2 is
+    subtracted; a non-finite ``v_log_f32`` passes through."""
+    small = x < 2.0**-126
+    xs = torch.where(small, x * 2.0**32, x)
+    y = torch.log2(xs)
+    fin = torch.isfinite(y)
+    yf = torch.where(fin, y, torch.ones_like(y))
+    out = []
+    for v in yf.flatten().tolist():
+        v = Fraction(v)
+        r = Fraction(_round_f32(v * _LN2_HI))
+        f0 = Fraction(_round_f32(v * _LN2_HI - r))
+        f1 = Fraction(_round_f32(v * _LN2_LO + f0))
+        out.append(_round_f32(v * _LN2_HI + f1))
+    r = torch.tensor(out, dtype=torch.float32, device=x.device).view(x.shape)
+    r = torch.where(fin, r, y)
+    return r - torch.where(small, torch.full_like(r, _f32(32 * 0.6931471805599453)), torch.zeros_like(r))
+
+
+def _chain(parts: torch.Tensor) -> torch.Tensor:
+    """``acc = 0.0; acc += parts[:, i]`` in order."""
+    acc = torch.zeros(parts.shape[0], device=parts.device)
+    for i in range(parts.shape[1]):
+        acc = acc + parts[:, i]
+    return acc
+
+
+def _search(chunks, offsets, lo, hi, p):
+    """The pivot search on [n, nch, size] chunks (zeros past the data) from (lo, hi]: the pivot, the minimum above it,
+    that minimum's count and the mass above it, of the last round."""
+    n = chunks.shape[0]
+    dev = chunks.device
+    done = torch.zeros(n, dtype=torch.bool, device=dev)
+    ppiv, mlp, psum = torch.ones(n, device=dev), torch.ones(n, device=dev), torch.zeros(n, device=dev)
+    nml = torch.zeros(n, dtype=torch.int64, device=dev)
+    for it in range(ITERS):
+        live = ~done
+        piv = (hi - lo) * 0.5 + lo
+        ab = chunks > piv[:, None, None]
+        cs = butterfly(torch.where(ab, chunks, torch.zeros_like(chunks)), offsets)
+        tmin = torch.where(ab, chunks, torch.ones_like(chunks)).amin(-1)
+        tcnt = (ab & ((chunks - tmin[..., None]).abs() < EPS)).sum(-1)
+        s0 = _chain(cs)
+        m0 = torch.ones(n, device=dev)
+        n0 = torch.zeros(n, dtype=torch.int64, device=dev)
+        for i in range(chunks.shape[1]):
+            tm, tc = tmin[:, i], tcnt[:, i]
+            n0 = torch.where(tm < m0, tc, n0 + tc * ((tm - m0).abs() < EPS))
+            m0 = torch.minimum(m0, tm)
+        found = (s0 >= p) & (fma32(-m0, n0.float(), s0) < p)
+        take = live & found
+        ppiv, mlp, nml, psum = (torch.where(take, a, b) for a, b in ((piv, ppiv), (m0, mlp), (n0, nml), (s0, psum)))
+        lo = torch.where(live & (s0 > p), piv, lo)
+        hi = torch.where(live & ~(s0 > p) & (s0 < p), piv, hi)
+        stop = live & (((hi - lo) < EPS) | (it + 1 >= ITERS))
+        ppiv = torch.where(stop, (hi + lo) / torch.full_like(hi, 2.0), ppiv)
+        mlp, nml, psum = (torch.where(stop, a, b) for a, b in ((m0, mlp), (n0, nml), (s0, psum)))
+        done = done | take | stop
+    return ppiv, mlp, nml, psum
+
+
+def top_p_mask_rows_reference(logits: torch.Tensor, p: torch.Tensor, debug: dict | None = None) -> torch.Tensor:
+    """fp32 [n, 200064] logits, fp32 [n] top-p -> masked logits (a new tensor), as vLLM's ``_topk_topp_kernel``
+    (top-k off, top-p on, one program per row) builds them on gfx950; any n."""
+    from .sigma_table import NORMAL_CDF_TO_SIGMA
+
+    n = logits.shape[0]
+    dev = logits.device
+    assert logits.dtype == torch.float32 and logits.shape[1] == V
+    x = logits.contiguous()
+    p = p.float().contiguous()
+    run = p < 1.0
+    ninf = float("-inf")
+    pad = torch.full((n, TILES * TILE), ninf, device=dev)
+    pad[:, :V] = x
+    valid = torch.arange(TILES * TILE, device=dev) < V
+    b0 = pad[:, :TILE]
+    fin = b0 > ninf
+    nf = fin.sum(1).float()
+    fl = torch.where(fin, b0, torch.zeros_like(b0))
+    s1 = butterfly(fl, STATS_OFFSETS)
+    s2 = butterfly(fl * fl, STATS_OFFSETS)
+    zero = torch.zeros(n, device=dev)
+    avg = torch.where(nf > 0, s1 / nf, zero)
+    sq = torch.where(nf > 0, s2 / nf, zero)
+    std = sqrt_f32(torch.clamp(fma32(-avg, avg, sq), min=0.0))
+    ms = fma32(std, torch.full_like(std, 10.0), avg)
+    xm = pad - ms[:, None]
+    e = torch.where(valid, exp_f32(xm), torch.zeros_like(pad))
+    se = _chain(butterfly(e.view(n, TILES, TILE), STATS_OFFSETS))
+    max_logit = pad.amax(1)
+    min_logit = torch.minimum(torch.where(pad > ninf, pad, torch.full_like(pad, float("inf"))).amin(1), max_logit)
+    idx = (p * 200.0).to(torch.int32).clamp(0, 199).long()
+    sig = torch.tensor(NORMAL_CDF_TO_SIGMA, dtype=torch.float32, device=dev)[idx]
+    sig = sig + sig.abs() * -0.25
+    oprob = exp_f32(fma32(std, sig, avg) - ms) / se
+    probs = exp_f32(xm) / se[:, None]
+    om = (probs > oprob[:, None]) & valid
+    so = _chain(butterfly(torch.where(om, probs, torch.zeros_like(probs)).view(n, TILES, TILE), STATS_OFFSETS))
+    hi = exp_f32(max_logit - ms) / se
+    lo = exp_f32(min_logit - ms) / se
+    b1 = so > p
+    ppiv, mlp, psum = torch.ones(n, device=dev), torch.ones(n, device=dev), torch.zeros(n, device=dev)
+    nml = torch.zeros(n, dtype=torch.int64, device=dev)
+    r1 = (run & b1).nonzero().flatten()
+    if r1.numel():
+        nout = om[r1].sum(1)
+        nch = int(-(-int(nout.max()) // CHUNK))
+        buf = torch.zeros(r1.numel(), max(nch, 1) * CHUNK, device=dev)
+        for k, r in enumerate(r1.tolist()):
+            v = probs[r][om[r]]
+            buf[k, :v.numel()] = v
+        out = _search(buf.view(r1.numel(), -1, CHUNK), CHUNK_OFFSETS, oprob[r1], hi[r1], p[r1])
+        for t, o in zip((ppiv, mlp, nml, psum), out):
+            t[r1] = o
+    r2 = (run & ~b1).nonzero().flatten()
+    if r2.numel():
+        buf = torch.where(valid, probs[r2], torch.zeros_like(probs[r2])).view(r2.numel(), TILES, TILE)
+        out = _search(buf, STATS_OFFSETS, lo[r2], hi[r2], p[r2])
+        for t, o in zip((ppiv, mlp, nml, psum), out):
+            t[r2] = o
+    dup = log_any_f32(mlp * se) + ms
+    q = (psum - p) / mlp
+    qi = torch.nan_to_num(q, nan=0.0).clamp(0, 4294967295.0).to(torch.int64)  # v_cvt_u32_f32 saturates
+    nkeep = (nml - qi) % 2**32
+    fpiv = log_any_f32(ppiv * se) + ms
+    apply = run & (fpiv < max_logit) & (fpiv != ninf)
+    keep = x > fpiv[:, None]
+    ties = apply & (nkeep < nml)
+    if bool(ties.any()):
+        dm = (x - dup[:, None]).abs() < EPS
+        rank = dm.long().cumsum(1)
+        keep = torch.where(ties[:, None], keep & ~(dm & (rank > nkeep[:, None])), keep)
+    if debug is not None:
+        debug.update(avg=avg, sq=sq, std=std, ms=ms, se=se, max=max_logit, min=min_logit, oprob=oprob, sout=so,
+                     nout=om.sum(1), branch=torch.where(b1, 1, 2), ppiv=ppiv, mlp=mlp, nml=nml, psum=psum, dup=dup,
+                     nkeep=nkeep, fpiv=fpiv)
+    return torch.where(apply[:, None] & ~keep, torch.full_like(x, ninf), x)

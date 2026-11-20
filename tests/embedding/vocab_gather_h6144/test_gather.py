@@ -4,14 +4,15 @@ import torch
 import torch.distributed as dist
 from amd_kernels.embedding.vocab_gather_h6144 import VocabGather
 from amd_kernels.embedding.vocab_gather_h6144.reference import vocab_gather_reference
-from tests.multi_gpu import run_on_4_gpus
+from tests.multi_gpu import run_on_2_gpus, run_on_4_gpus
 
 
 def worker(rank,errors):
     from flydsl.compiler.jit_function import MlirCompiler
     dev=torch.device('cuda',rank)
+    world=dist.get_world_size()
     torch.manual_seed(37)
-    shards=[torch.randn((128,6144),dtype=torch.bfloat16) for _ in range(4)]
+    shards=[torch.randn((128,6144),dtype=torch.bfloat16) for _ in range(world)]
     for shard in shards:
         shard[0,:8]=torch.tensor([0.,-0.,2.**-133,-2.**-133,2.**-126,-2.**-126,1.,-1.],dtype=torch.bfloat16)
     weight=shards[rank].to(dev)
@@ -24,9 +25,9 @@ def worker(rank,errors):
     for test_case in range(18):
         m=(1,7,70,112,224,448,896,1792,2048)[test_case%9]
         dtype=torch.int32 if test_case<9 else torch.int64
-        ids=torch.randint(-2,514,(m,),dtype=dtype)
+        ids=torch.randint(-2,world*128+2,(m,),dtype=dtype)
         ids[0]=0
-        if m>7:ids[:7]=torch.tensor([0,128,256,384,-1,512,511])
+        if m>7:ids[:7]=torch.tensor([0,128,(world-1)*128,world*128-129,-1,world*128,world*128-1])
         inputs=ids.to(dev)
         expected=vocab_gather_reference(shards,ids).to(dev)
         eager=c(inputs)
@@ -45,3 +46,6 @@ def worker(rank,errors):
 
 
 def test_peer_embedding():run_on_4_gpus(worker,timeout=180)
+
+
+def test_peer_embedding_ranks2():run_on_2_gpus(worker,timeout=180)

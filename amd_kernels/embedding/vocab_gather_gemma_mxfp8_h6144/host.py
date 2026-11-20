@@ -12,10 +12,10 @@ from .kernel_fourwave import compile_vocab_gather_gemma_mxfp8_fourwave
 
 
 @functools.cache
-def get_kernel(tiled, id_bits, fourwave):
+def get_kernel(tiled, id_bits, fourwave, ranks=4):
     compiler = (compile_vocab_gather_gemma_mxfp8_fourwave if fourwave
                 else compile_vocab_gather_gemma_mxfp8)
-    return compiler(tiled, id_bits)
+    return compiler(tiled, id_bits, ranks)
 
 
 def vocab_gather_gemma_mxfp8(ids, lookup, weight, eps=1e-6, code_tile_rows=16):
@@ -39,7 +39,7 @@ def vocab_gather_gemma_mxfp8(ids, lookup, weight, eps=1e-6, code_tile_rows=16):
     residual = torch.empty((m, 6144), device=ids.device, dtype=torch.bfloat16)
     if m:
         _run_compiled(
-            get_kernel(code_tile_rows > 0, 32 if ids.dtype == torch.int32 else 64, m > 512),
+            get_kernel(code_tile_rows > 0, 32 if ids.dtype == torch.int32 else 64, m > 512, lookup.ranks),
             ids.data_ptr(), lookup.peers.data_ptr(), lookup.shard_vocab, weight.data_ptr(),
             q.data_ptr(), scales.data_ptr(), residual.data_ptr(), q.numel(), scales.numel(), m,
             struct.unpack('<i', struct.pack('<f', eps))[0], torch.cuda.current_stream(),

@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the amd-kernels project
 """``host.warm_up_decode`` (and the entry's first-call warm-up, ``amd_kernels.warm_up``) compiles every variant a TP4
-server launches, bf16 and fp16 compute: afterwards no request count of 1-64 (bf16 output, and the MXFP8 output from 8
-rows) compiles. Also the first-call warm-up alone: one call, then every count to ``WARM_MAX_REQS`` without a
-compile."""
+(1 KV head) or TP2 (2 KV heads) server launches, bf16 and fp16 compute: afterwards no request count of 1-64 (bf16
+output, and the MXFP8 output from 8 rows) compiles. Also the first-call warm-up alone: one call, then every count to
+``WARM_MAX_REQS`` without a compile."""
 import json
 import os
 import subprocess
@@ -13,7 +13,7 @@ import pytest
 import torch
 
 
-def scenario(ql, explicit, compute):
+def scenario(ql, explicit, compute, hkv):
     from flydsl.compiler.jit_function import MlirCompiler
     from amd_kernels import warm_up
     from amd_kernels.attention.nvfp4_sparse_decode_gqa16_d128_p128_top16 import host
@@ -30,7 +30,7 @@ def scenario(ql, explicit, compute):
 
     MlirCompiler.compile = spy
     dev = torch.device("cuda")
-    heads, hkv, max_reqs = 16, 1, 64
+    heads, max_reqs = 16 * hkv, 64
     walk = range(1, max_reqs + 1) if explicit else (1, 2, 7, 33, 64, 100, 255, 256)
     kv = torch.zeros((2, 2 * hkv, 128, 72), dtype=torch.uint8, device=dev)
 
@@ -66,14 +66,16 @@ def scenario(ql, explicit, compute):
     return dict(warm=warm, late=late, reported=warm_up.late_compiles())
 
 
+@pytest.mark.parametrize("hkv", [1, 2], ids=["kv1", "kv2"])
 @pytest.mark.parametrize("compute", ["bfloat16", "float16"])
 @pytest.mark.parametrize("ql", [8, 4])
 @pytest.mark.parametrize("explicit", [True, False], ids=["warm_up_decode", "first_call"])
-def test_warm_up_then_no_compile(ql, explicit, compute, tmp_path):
+def test_warm_up_then_no_compile(ql, explicit, compute, hkv, tmp_path):
     from .test_sparse_decode import require_gfx950
 
     require_gfx950()
-    proc = subprocess.run([sys.executable, "-m", __name__, str(ql), str(int(explicit)), compute], capture_output=True,
+    proc = subprocess.run([sys.executable, "-m", __name__, str(ql), str(int(explicit)), compute, str(hkv)],
+                          capture_output=True,
                           text=True, timeout=1500,
                           env={**os.environ, "FLYDSL_RUNTIME_ENABLE_CACHE": "1",
                                "FLYDSL_RUNTIME_CACHE_DIR": str(tmp_path / "flydsl")})
@@ -83,4 +85,4 @@ def test_warm_up_then_no_compile(ql, explicit, compute, tmp_path):
 
 
 if __name__ == "__main__":
-    print(json.dumps(scenario(int(sys.argv[1]), bool(int(sys.argv[2])), getattr(torch, sys.argv[3]))))
+    print(json.dumps(scenario(int(sys.argv[1]), bool(int(sys.argv[2])), getattr(torch, sys.argv[3]), int(sys.argv[4]))))

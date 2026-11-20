@@ -8,6 +8,7 @@ import torch
 
 from .kernel import compile_bf16_gemm_packed_rows_shuffled
 from .kernel_direct import compile_bf16_gemm_packed_rows
+from .kernel_m128 import compile_bf16_gemm_packed_rows_m128
 from .pack import compile_pack_bf16_rows
 from .reference import K, N
 
@@ -17,12 +18,14 @@ DIRECT_MAX_ROWS = 7
 
 
 def padded_rows(n: int) -> int:
-    assert 0 <= n <= 64
-    return 16 if n <= 16 else (32 if n <= 32 else 64)
+    assert 0 <= n <= 128
+    return 16 if n <= 16 else (32 if n <= 32 else (64 if n <= 64 else 128))
 
 
 @functools.cache
 def _gemm(mt: int, shuffled: bool):
+    if mt == 8:
+        return compile_bf16_gemm_packed_rows_m128()
     if shuffled:
         return compile_bf16_gemm_packed_rows_shuffled(mt)
     return compile_bf16_gemm_packed_rows(mt)
@@ -65,7 +68,7 @@ def pack_bf16_rows(x: torch.Tensor, row_indices: torch.Tensor, packed: torch.Ten
 def bf16_gemm_packed_rows(
     packed: torch.Tensor, weight: torch.Tensor, n: int, out: torch.Tensor,
 ) -> torch.Tensor:
-    """FP32-accumulated bf16 projection of 0-64 packed rows; original weight layout."""
+    """FP32-accumulated bf16 projection of 0-128 packed rows; original weight layout."""
     pad = padded_rows(n)
     assert packed.shape == (pad, K) and packed.dtype == torch.bfloat16 and packed.is_contiguous()
     assert weight.shape == (N, K) and weight.dtype == torch.bfloat16 and weight.is_contiguous()
@@ -80,10 +83,10 @@ def bf16_gemm_packed_rows(
 
 
 def warmup_bf16_gemm_packed_rows(device: torch.device) -> None:
-    """Compile the four GEMMs and three pack variants before graph capture."""
+    """Compile the five GEMMs and four pack variants before graph capture."""
     w = torch.zeros(N, K, dtype=torch.bfloat16, device=device)
-    x = torch.zeros(64, K, dtype=torch.bfloat16, device=device)
-    for n in (1, 8, 17, 33):
+    x = torch.zeros(128, K, dtype=torch.bfloat16, device=device)
+    for n in (1, 8, 17, 33, 65):
         p = torch.empty(padded_rows(n), K, dtype=torch.bfloat16, device=device)
         indices = torch.arange(n, device=device)
         pack_bf16_rows(x, indices, p)

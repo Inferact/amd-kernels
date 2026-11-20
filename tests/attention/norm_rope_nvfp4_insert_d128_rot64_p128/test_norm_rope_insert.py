@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the amd-kernels project
-"""The norm / RoPE / NVFP4 insert kernels against ``reference.py`` on the served heads, q16 kv1 iq1 (TP4): per path
-(main kernel, prefill variant, split-K form) the contract, CUDA graph replay on new inputs, three bitwise-equal
-repeats, and the variants' bytes equal to the main kernel's."""
+"""The norm / RoPE / NVFP4 insert kernels against ``reference.py`` on the served heads, q16 kv1 iq1 (TP4) and q32 kv2
+iq2 (TP2): per path (main kernel, prefill variant, split-K form) the contract, CUDA graph replay on new inputs, three
+bitwise-equal repeats, and the variants' bytes equal to the main kernel's."""
 
 import pytest
 import torch
@@ -16,8 +16,8 @@ from amd_kernels.attention.norm_rope_nvfp4_insert_d128_rot64_p128 import referen
 D, BLK, WIDTH = ref.D, ref.BLK, ref.WIDTH
 EPS = 1e-6
 ROT = 64
-HEADS = {"q16_kv1_iq1": (16, 1, 1)}
-TP4 = HEADS["q16_kv1_iq1"]
+HEADS = {"q16_kv1_iq1": (16, 1, 1), "q32_kv2_iq2": (32, 2, 2)}
+TP4, TP2 = HEADS["q16_kv1_iq1"], HEADS["q32_kv2_iq2"]
 DSPARK = ([3 + 9 * i for i in range(43)], [4] * 43)  # 172 decode rows (4 per request)
 # (starts, lens, pad)
 CASES = {
@@ -208,7 +208,7 @@ def test_main_kernel_contract(heads, case, scales):
     """The main kernel (1 token pair per wave up to 512 tokens, 4 above)."""
     require_gfx950()
     batch = Batch(*CASES[case], HEADS[heads], scales)
-    check(batch, batch.run(), batch.reference(), f"{heads} {case} pairs {host._token_pairs_per_wave(batch.n)}")
+    check(batch, batch.run(), batch.reference(), f"{heads} {case} {host._launcher(batch.n, HEADS[heads]).kernel_name}")
 
 
 @pytest.mark.parametrize("m", [512, 513, 1024, 2048, 4095])
@@ -224,16 +224,20 @@ def test_streaming_q_store_contract(m):
 
 
 def test_insert_blocker():
-    """The served layer fits; another head set, head dim, RoPE, index-q dtype or cos / sin cache gets a reason, the
-    warm-up compiles nothing for it and the entries assert it (host only)."""
-    assert host.insert_blocker(*TP4, ROT) is None
+    """The served layers (TP4, TP2) fit; another head set, head dim, RoPE, index-q dtype or cos / sin cache gets a
+    reason, the warm-up compiles nothing for it and the entries assert it (host only)."""
     cache = torch.zeros(8, ROT, dtype=torch.bfloat16)
-    assert host.insert_blocker(*TP4, ROT, head_dim=D, index_head_dim=D, neox=True,
-                               index_q_dtype=torch.float8_e4m3fn, cos_sin_cache=cache) is None
+    for heads in (TP4, TP2):
+        assert host.insert_blocker(*heads, ROT) is None
+        assert host.insert_blocker(*heads, ROT, head_dim=D, index_head_dim=D, neox=True,
+                                   index_q_dtype=torch.float8_e4m3fn, cos_sin_cache=cache) is None
     for args, kw, word in [
         ((64, 4, 4, ROT), {}, "heads"),
-        ((32, 2, 2, ROT), {}, "heads"),
+        ((32, 2, 4, ROT), {}, "heads"),  # TP2 with the context-parallel indexer
+        ((32, 1, 1, ROT), {}, "heads"),
         ((16, 1, 4, ROT), {}, "heads"),
+        ((*TP2, 32), {}, "RoPE"),
+        ((*TP2, ROT), dict(index_q_dtype=torch.bfloat16), "index-q"),
         ((*TP4, 32), {}, "RoPE"),
         ((*TP4, ROT), dict(neox=False), "NeoX"),
         ((*TP4, ROT), dict(head_dim=64), "head dim"),
@@ -261,10 +265,15 @@ def test_insert_blocker():
 
 
 def test_streaming_q_store_scope():
-    """Only the four-pair main kernel uses streaming stores."""
+    """TP4: only the four-pair main kernel uses streaming stores. TP2: every tile from 8 rows does, and no row count
+    reaches the q16 tiles."""
     for pairs, want in [(4, True), (1, False)]:
         exe = host._get_kernel(*TP4, ROT, pairs)
         assert exe.kernel_name.endswith("_qnt") == want
+    for n in (1, 289, 300, 384, 512, 513, 1537, 24576, 32768):
+        for prefill in (False, True):
+            name = host._launcher(n, TP2, prefill).kernel_name
+            assert "_q32_kv2_iq2_" in name and (name.endswith("_qnt") or n < 8), (n, prefill, name)
 
 
 @pytest.mark.parametrize("case", list(PREFILL_CASES))
@@ -348,34 +357,98 @@ def test_tp4_streaming_onepair_bytes(m, monkeypatch):
     assert_bitwise(got, batch.run(), f"streaming one-pair {m}")
 
 
+def tp2_main_one_pair(monkeypatch):
+    """Every TP2 call on the plain one-pair main kernel (no nt stores)."""
+    monkeypatch.setattr(host, "_tp2_launcher", lambda n, prefill: host._get_kernel(*TP2, ROT, 1))
+
+
+# every TP2 tier and its edges (the one-pair main kernel to 7 rows, the V-split one-pair tile to 512, the prefill
+# variant above)
+TP2_ROWS = [2, 7, 8, 9, 64, 172, 289, 384, 450, 511, 512, 513, 1024, 1537, 4097]
+
+
+@pytest.mark.parametrize("m", TP2_ROWS)
+@torch.inference_mode()
+def test_tp2_tier_bytes(m, monkeypatch):
+    """TP2 heads at every tier: the contract, and (as the prefill hint) the one-pair main kernel's bytes; odd rows, a
+    zero row, stale pages, disabled index slots and a padding tail."""
+    require_gfx950()
+    batch = Batch([125], [m - 1], 1, TP2, (0.37, 0.21), seed=m, index_skip=0.01)
+    batch.qkv[0].zero_()
+    got = batch.run()
+    check(batch, got, batch.reference(), f"tp2 {host._launcher(m, TP2).kernel_name}")
+    assert_bitwise(got, batch.run(prefill=True), f"tp2 {m} prefill hint")
+    tp2_main_one_pair(monkeypatch)
+    assert_bitwise(got, batch.run(), f"tp2 {m}")
+
+
+def dspark7_case(n_req, lead, pad):
+    """DSpark-7 decode rows: a ``lead``-token request, then ``n_req`` requests of 8 tokens whose first position
+    walks every octet offset (runs of 8, 7 + 1, ..., 1 + 7 tokens)."""
+    starts = [3001 + 128 * r + r % 8 for r in range(n_req)]
+    return [1000, *starts] if lead else starts, ([lead] if lead else []) + [8] * n_req, pad
+
+
+@pytest.mark.parametrize("n_req,lead,pad", [(1, 0, 0), (8, 0, 0), (8, 3, 5), (31, 1, 0), (32, 0, 0), (40, 3, 0),
+                                             (47, 5, 3), (52, 0, 0), (60, 7, 9)])
+@torch.inference_mode()
+def test_tp2_dspark7_bytes(n_req, lead, pad, monkeypatch):
+    """TP2 decode as served (8 rows per request, every octet offset, odd leading requests that flip which wave half
+    starts a run, graph padding): the contract, and the one-pair main kernel's bytes."""
+    require_gfx950()
+    batch = Batch(*dspark7_case(n_req, lead, pad), TP2, (0.37, 0.21), seed=n_req + lead, index_skip=0.01)
+    got = batch.run()
+    check(batch, got, batch.reference(), f"tp2 dspark7 {host._launcher(batch.n, TP2).kernel_name}")
+    tp2_main_one_pair(monkeypatch)
+    assert_bitwise(got, batch.run(), f"tp2 dspark7 {n_req} {lead} {pad}")
+
+
+@pytest.mark.parametrize("case", [*PREFILL_CASES, "n32768_req8"])
+@torch.inference_mode()
+def test_tp2_prefill_variant_bytes(case, monkeypatch):
+    """TP2 heads at prefill sizes (up to a 32768-token chunk): the contract and the one-pair main kernel's bytes."""
+    require_gfx950()
+    batch = Batch(*(PREFILL_CASES.get(case) or prefill_case(32768, 8)), TP2, (0.37, 0.21), seed=2, index_skip=0.01)
+    got = batch.run()
+    check(batch, got, batch.reference(), f"tp2 prefill variant {case}")
+    tp2_main_one_pair(monkeypatch)
+    assert_bitwise(got, batch.run(), case)
+
+
 # (tokens, split count): the QKV GEMM's deferred rows (split 3 at 1-128 tokens, 2 at 193-288) and other split counts
 REDUCE_CASES = [(1, 3), (7, 2), (8, 3), (16, 3), (32, 4), (64, 4), (68, 4), (132, 2), (172, 8),
                 (256, 3), (600, 3)]
+# TP2: both tiers (one pair to 160 rows, two above) at splits 1-8
+TP2_REDUCE_CASES = [(1, 3), (8, 2), (32, 3), (64, 4), (160, 2), (161, 3), (256, 2), (384, 1), (449, 3), (600, 8)]
+REDUCE = [(TP4, m, sk) for m, sk in REDUCE_CASES] + [(TP2, m, sk) for m, sk in TP2_REDUCE_CASES]
+REDUCE_IDS = [f"q{h[0]}-m{m}-s{sk}" for h, m, sk in REDUCE]
 
 
-@pytest.mark.parametrize("m,split_k", REDUCE_CASES)
+@pytest.mark.parametrize("heads,m,split_k", REDUCE, ids=REDUCE_IDS)
 @torch.inference_mode()
-def test_splitk_reduce_contract(m, split_k):
+def test_splitk_reduce_contract(heads, m, split_k):
     """The split-K reduce kernel, the last token graph padding."""
     require_gfx950()
-    batch = Batch([3], [m - 1], 1, TP4, (0.5, 2.0), seed=m)
+    batch = Batch([3], [m - 1], 1, heads, (0.5, 2.0), seed=m)
     slab = make_slab(batch, split_k, m)
     check(batch, batch.run_reduce(slab), batch.reference(slab=slab), f"reduce m{m} s{split_k}")
 
 
 @pytest.mark.parametrize("iq_mode", ["rank", "cols"])
 @pytest.mark.parametrize("case", ["dspark", "prefill600"])
+@pytest.mark.parametrize("heads", list(HEADS))
 @torch.inference_mode()
-def test_index_q_out_view(iq_mode, case):
-    """index_q_out as a slice of a bigger buffer (the context-parallel indexer's
-    [4, n, 128] buffer, or a column slice); bytes outside it stay untouched."""
+def test_index_q_out_view(heads, iq_mode, case):
+    """index_q_out as a slice of a bigger buffer (a per-rank [ranks, n, niq * 128] buffer, or a column slice); bytes
+    outside it stay untouched."""
     require_gfx950()
     starts, lens = DSPARK if case == "dspark" else ([7], [600])
-    batch = Batch(starts, lens, 5, TP4)
+    batch = Batch(starts, lens, 5, HEADS[heads])
     n, w = batch.n, batch.niq * D
     if iq_mode == "rank":
-        buf = torch.full((4, n, w), 0x7F, dtype=torch.uint8, device="cuda")
-        iq = buf[2]
+        ranks = 64 // batch.nq
+        buf = torch.full((ranks, n, w), 0x7F, dtype=torch.uint8, device="cuda")
+        iq = buf[ranks - 2]
     else:
         buf = torch.full((n, 3 * w), 0x7F, dtype=torch.uint8, device="cuda")
         iq = buf[:, w : 2 * w]
@@ -386,10 +459,11 @@ def test_index_q_out_view(iq_mode, case):
     assert bool((buf == 0x7F).all()), "bytes outside index_q_out written"
 
 
+@pytest.mark.parametrize("heads", list(HEADS))
 @torch.inference_mode()
-def test_64k_tokens():
+def test_64k_tokens(heads):
     require_gfx950()
-    batch = Batch([0, 777], [32768, 32768], 0, TP4)
+    batch = Batch([0, 777], [32768, 32768], 0, HEADS[heads])
     check(batch, batch.run(), batch.reference(), "64K")
 
 
@@ -405,15 +479,17 @@ def test_all_padding(heads):
 
 
 @pytest.mark.parametrize("variant", ["main", "prefill"])
+@pytest.mark.parametrize("heads", list(HEADS))
 @torch.inference_mode()
-def test_block_outer_pages(variant, monkeypatch):
+def test_block_outer_pages(heads, variant, monkeypatch):
     """Each block holds the layers' main and index pages in layer order ([M0 I0 M1 I1]):
     writing layer 0 through its strided views stores the bytes of dense caches and
     leaves layer 1's pages untouched."""
     require_gfx950()
-    if variant == "main":
-        monkeypatch.setattr(host, "PREFILL_TOKENS", 1 << 30)  # the main kernel at this size
-    batch = Batch(*PREFILL_CASES["n4097_req3"], TP4, (0.37, 0.21), seed=1, index_skip=0.01)
+    if variant == "main":  # the main kernel at this size
+        monkeypatch.setattr(host, "PREFILL_TOKENS", 1 << 30)
+        tp2_main_one_pair(monkeypatch)
+    batch = Batch(*PREFILL_CASES["n4097_req3"], HEADS[heads], (0.37, 0.21), seed=1, index_skip=0.01)
     nb = batch.kv_full.shape[0]
     kv_page, idx_page = batch.main, BLK * WIDTH
     block = torch.randint(0, 256, (nb, 2 * (kv_page + idx_page)), dtype=torch.uint8, device="cuda")
@@ -446,6 +522,13 @@ PATHS = {
     "reduce_q16_pairs2_s3": ("reduce3", TP4, ([3], [127], 1)),
     "reduce_q16_pairs2_s2": ("reduce2", TP4, ([125], [150], 1)),
     "reduce_q16_pairs1_s2": ("reduce2", TP4, ([125, 254], [123, 132], 1)),
+    "vsplit_q32": ("main", TP2, CASES["dspark172_pad20"]),
+    "vsplit_q32_dspark7": ("main", TP2, dspark7_case(47, 5, 3)),
+    "prefill_pairs4_q32": ("main", TP2, PREFILL_CASES["n4097_req3"]),
+    "prefill_hint_q32": ("prefill", TP2, ([0, 300], [200, 250], 0)),
+    "reduce_q32_pairs1_s3": ("reduce3", TP2, ([3], [31], 1)),
+    "reduce_q32_pairs2_s2": ("reduce2", TP2, ([125, 254], [123, 132], 1)),
+    "reduce_q32_pairs2_s3": ("reduce3", TP2, ([125], [599], 1)),
 }
 
 
@@ -523,13 +606,13 @@ def test_deterministic(name):
 # --- the variants write the main kernel's bytes -----------------------------------------
 
 
-@pytest.mark.parametrize("m,split_k", REDUCE_CASES)
+@pytest.mark.parametrize("heads,m,split_k", REDUCE, ids=REDUCE_IDS)
 @torch.inference_mode()
-def test_splitk_reduce_bitwise(m, split_k):
+def test_splitk_reduce_bitwise(heads, m, split_k):
     """The reduce kernel equals the reduce (``((0 + s0) + s1) ...`` in fp32, bf16 store)
     followed by the main kernel, bit for bit."""
     require_gfx950()
-    batch = Batch([3], [m - 1], 1, TP4, (0.5, 2.0), seed=m)
+    batch = Batch([3], [m - 1], 1, heads, (0.5, 2.0), seed=m)
     slab = make_slab(batch, split_k, m)
     fused = batch.run_reduce(slab)
     batch.qkv = ref.splitk_reduce(slab)

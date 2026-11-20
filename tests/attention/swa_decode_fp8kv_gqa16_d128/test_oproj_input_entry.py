@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the amd-kernels project
 """``swa_decode_fp8kv_oproj_input`` (the attention as its o_proj's input, the MXFP8 / bf16 choice and the codes'
 buffers in the library): bit for bit what the kernel entry writes when the caller makes the same choice itself
-(the TP4 DSpark 3 / 7 shapes, 1-64 requests); its first call of a mode compiles every request count's variant."""
+(the TP4 and TP2 DSpark 3 / 7 shapes); its first call of a mode compiles every request count's variant."""
 import json
 import os
 import subprocess
@@ -15,19 +15,20 @@ from amd_kernels.attention.swa_decode_fp8kv_gqa16_d128.oproj_input import mxfp8_
 from amd_kernels.gemm.mxfp8_common import gemm as G
 
 from .test_decode import SM_SCALE, W, make_batch, require_gfx950, scales
-from .test_oproj_input import K, N, code_buffers, real_bytes
+from .test_oproj_input import N, code_buffers, real_bytes
 
 
+@pytest.mark.parametrize("hkv", [1, 2], ids=["tp4", "tp2"])
 @pytest.mark.parametrize("ql", [3, 7])
 @pytest.mark.parametrize("reqs", [1, 2, 5, 11, 16, 48, 64])
 @pytest.mark.parametrize("causal", [False, True])
-def test_entry_equals_kernel_calls(ql, reqs, causal):
+def test_entry_equals_kernel_calls(ql, reqs, causal, hkv):
     require_gfx950()
     gen = torch.Generator().manual_seed(reqs * 10 + ql)
     pool, bt, sl, qsl, q, _ = [t.cuda() if isinstance(t, torch.Tensor) else t
-                               for t in make_batch(reqs, ql, 0, gen, 128, 1)]
+                               for t in make_batch(reqs, ql, 0, gen, 128, hkv)]
     ks, vs = scales()
-    rows = q.shape[0]
+    rows, k = q.shape[0], hkv * 16 * 128
     args = (pool, bt, sl, qsl, ql, SM_SCALE, W, causal, ks, vs)
     # bf16: the entry without an o_proj (3-D and 2-D q)
     want = torch.full_like(q, float("nan"))
@@ -41,15 +42,15 @@ def test_entry_equals_kernel_calls(ql, reqs, causal):
         assert isinstance(got, torch.Tensor) and torch.equal(got.view(torch.int16), want.view(rows, -1).view(torch.int16))
         return
     codes, sc, tile = got
-    assert tile == G.prequant_code_tile_rows(rows, N, K, torch.bfloat16)
-    want_c, want_s = code_buffers(rows, tile)
+    assert tile == G.prequant_code_tile_rows(rows, N, k, torch.bfloat16)
+    want_c, want_s = code_buffers(rows, tile, k=k)
     swa_decode_fp8kv(q, *args, None, quant_out=(want_c, want_s, tile))
     torch.cuda.synchronize()
     for a, b in zip(real_bytes(codes, sc, rows, tile), real_bytes(want_c, want_s, rows, tile)):
         assert torch.equal(a, b)
 
 
-def scenario():
+def scenario(hkv):
     from flydsl.compiler.jit_function import MlirCompiler
     from amd_kernels import warm_up
     warm_up.set_auto(True)
@@ -67,7 +68,7 @@ def scenario():
         for ql in (3, 7):
             gen = torch.Generator().manual_seed(reqs)
             pool, bt, sl, qsl, q, _ = [t.cuda() if isinstance(t, torch.Tensor) else t
-                                       for t in make_batch(reqs, ql, 0, gen, 128, 1, ctx_hi=600)]
+                                       for t in make_batch(reqs, ql, 0, gen, 128, hkv, ctx_hi=600)]
             before = len(late)
             for oproj in (None, N):
                 swa_decode_fp8kv_oproj_input(q.view(q.shape[0], -1), pool, bt, sl, qsl, ql, SM_SCALE, W, False, ks,
@@ -78,9 +79,10 @@ def scenario():
     return {"late": bad, "reported": warm_up.late_compiles(), "warmed": len(warm_up.warmed())}
 
 
-def test_first_call_warm_up_compiles_every_variant(tmp_path):
+@pytest.mark.parametrize("hkv", [1, 2], ids=["tp4", "tp2"])
+def test_first_call_warm_up_compiles_every_variant(tmp_path, hkv):
     require_gfx950()
-    proc = subprocess.run([sys.executable, "-m", __name__], capture_output=True, text=True, timeout=1500,
+    proc = subprocess.run([sys.executable, "-m", __name__, str(hkv)], capture_output=True, text=True, timeout=1500,
                           env={**os.environ, "FLYDSL_RUNTIME_CACHE_DIR": str(tmp_path / "flydsl")})
     assert proc.returncode == 0, proc.stdout[-3000:] + proc.stderr[-3000:]
     result = json.loads(proc.stdout.strip().splitlines()[-1])
@@ -88,4 +90,4 @@ def test_first_call_warm_up_compiles_every_variant(tmp_path):
 
 
 if __name__ == "__main__":
-    print(json.dumps(scenario()))
+    print(json.dumps(scenario(int(sys.argv[1]))))

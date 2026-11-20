@@ -9,6 +9,7 @@ import torch
 
 from . import kernel as _kernel
 from . import kernel_q16_kv1_iq1_streaming as _kernel_streaming
+from . import kernel_q32_kv2_iq2_vsplit as _kernel_vsplit
 from . import kernel_prefill_q64_kv4_iq4 as _kernel_prefill
 from . import splitk_reduce_kernel_q64_kv4_iq4 as _reduce_kernel
 
@@ -24,8 +25,10 @@ def _run_compiled(exe, *args):
         cf(*args)
 
 
-# (q heads, KV heads, index heads, rotary dim) of the layer at TP4, the one head set the entries take
-HEADS = (16, 1, 1, 64)
+ROT = 64
+TP4 = (16, 1, 1)  # (q heads, KV heads, index heads) per rank
+TP2 = (32, 2, 2)
+SERVED = (TP4, TP2)
 
 
 def insert_blocker(
@@ -41,23 +44,23 @@ def insert_blocker(
     cos_sin_cache: torch.Tensor | None = None,
 ) -> str | None:
     """Why a sparse attention layer (this rank's heads) does not fit the insert and its one-call QKV forms (None: it
-    fits): 16 query, 1 KV and 1 index head of 128 dims (TP4), NeoX RoPE on dims 0-63, an e4m3 index-q, a contiguous
-    bf16 cos / sin cache [rows, 64]. The entries assert the same."""
-    if (num_heads, num_kv_heads, num_index_heads) != HEADS[:3]:
+    fits): 16 query, 1 KV and 1 index head (TP4) or 32, 2 and 2 (TP2) of 128 dims, NeoX RoPE on dims 0-63, an e4m3
+    index-q, a contiguous bf16 cos / sin cache [rows, 64]. The entries assert the same."""
+    if (num_heads, num_kv_heads, num_index_heads) not in SERVED:
         return (
             f"{num_heads} query / {num_kv_heads} KV / {num_index_heads} index heads per rank "
-            f"(q{HEADS[0]} kv{HEADS[1]} iq{HEADS[2]}, TP4)"
+            f"(q16 kv1 iq1 at TP4, q32 kv2 iq2 at TP2)"
         )
     if (head_dim, index_head_dim) != (_kernel.D, _kernel.D):
         return f"head dim {head_dim}, index head dim {index_head_dim} ({_kernel.D})"
-    if rotary_dim != HEADS[3] or not neox:
-        return f"RoPE on {rotary_dim} dims{'' if neox else ', not NeoX'} (NeoX on {HEADS[3]})"
+    if rotary_dim != ROT or not neox:
+        return f"RoPE on {rotary_dim} dims{'' if neox else ', not NeoX'} (NeoX on {ROT})"
     if index_q_dtype != torch.float8_e4m3fn:
         return f"index-q {index_q_dtype} (e4m3)"
     c = cos_sin_cache
-    if c is not None and (c.dtype != torch.bfloat16 or c.dim() != 2 or c.shape[1] != HEADS[3]
+    if c is not None and (c.dtype != torch.bfloat16 or c.dim() != 2 or c.shape[1] != ROT
                           or not c.is_contiguous()):
-        return f"cos / sin cache {tuple(c.shape)} {c.dtype} (contiguous bf16 [rows, {HEADS[3]}])"
+        return f"cos / sin cache {tuple(c.shape)} {c.dtype} (contiguous bf16 [rows, {ROT}])"
     return None
 
 
@@ -79,6 +82,11 @@ def _get_prefill_kernel(nq: int, nkv: int, niq: int, rotary_dim: int, tp: int):
 @functools.cache
 def _get_streaming_q16_kernel():
     return _kernel_streaming.compile_streaming_q16_kv1_iq1()
+
+
+@functools.cache
+def _get_vsplit_q32_kernel():
+    return _kernel_vsplit.compile_norm_rope_insert_q32_kv2_iq2()
 
 
 def _token_pairs_per_wave(n: int) -> int:
@@ -109,6 +117,32 @@ def _prefill_token_pairs(n):
     if STREAMING_PREFILL_RANGE[0] <= n <= STREAMING_PREFILL_RANGE[1]:
         return 8
     return _main_token_pairs(n)
+
+
+def _tp4_launcher(n: int, prefill: bool):
+    tp = _main_token_pairs(n)
+    if _use_prefill(n, prefill, tp):
+        return _get_prefill_kernel(*TP4, ROT, _prefill_token_pairs(n))
+    if 289 <= n <= 384:
+        return _get_streaming_q16_kernel()
+    return _get_kernel(*TP4, ROT, tp)
+
+
+def _tp2_launcher(n: int, prefill: bool):
+    # V-split tile at 8-512 rows (QKV chain -0.3..-1.7 us vs one pair, +0.1 us at 1 row); above 4 prefill pairs -2..-12%
+    if n < 8 and not prefill:
+        return _get_kernel(*TP2, ROT, 1)
+    if n <= 512 and not prefill:
+        return _get_vsplit_q32_kernel()
+    return _get_prefill_kernel(*TP2, ROT, 4)
+
+
+def _launcher(n: int, heads: tuple, prefill: bool = False, split_k: int = 0):
+    """The compiled launcher a call of ``n`` rows takes (``split_k``: the split-K form)."""
+    if split_k:
+        pairs = _reduce_token_pairs(n, split_k) if heads == TP4 else _tp2_reduce_token_pairs(n)
+        return _get_reduce_kernel(*heads, ROT, pairs, split_k)
+    return _tp4_launcher(n, prefill) if heads == TP4 else _tp2_launcher(n, prefill)
 
 
 def norm_rope_nvfp4_insert(
@@ -155,15 +189,8 @@ def norm_rope_nvfp4_insert(
     assert kv_cache.stride(1) == _kernel.BLK * 72 and kv_cache.stride(3) == 1
     assert index_cache.shape[1:] == (_kernel.BLK, 72) and index_cache.stride(2) == 1
     assert index_cache.stride(1) == 72
-    tp = _main_token_pairs(n)
-    if _use_prefill(n, prefill, tp):
-        exe = _get_prefill_kernel(nq, nkv, niq, rotary_dim, _prefill_token_pairs(n))
-    elif 289 <= n <= 384:
-        exe = _get_streaming_q16_kernel()
-    else:
-        exe = _get_kernel(nq, nkv, niq, rotary_dim, tp)
     _run_compiled(
-        exe,
+        _launcher(n, (nq, nkv, niq), prefill),
         qkv.data_ptr(),
         q_out.data_ptr(),
         index_q_out.data_ptr(),
@@ -199,6 +226,11 @@ def _reduce_token_pairs(n, split_k):
     if split_k == 2 and 176 < n <= 288:
         return 1
     return 1 if n <= 32 else (2 if n <= 512 else 4)
+
+
+def _tp2_reduce_token_pairs(n):
+    # two pairs from 161 rows: -1..-11% at 192-768 rows (four pairs win nowhere by more than noise)
+    return 1 if n <= 160 else 2
 
 
 def splitk_reduce_norm_rope_nvfp4_insert(
@@ -245,9 +277,8 @@ def splitk_reduce_norm_rope_nvfp4_insert(
     assert kv_cache.stride(1) == _kernel.BLK * 72 and kv_cache.stride(3) == 1
     assert index_cache.shape[1:] == (_kernel.BLK, 72) and index_cache.stride(2) == 1
     assert index_cache.stride(1) == 72
-    token_pairs = _reduce_token_pairs(n, split_k)
     _run_compiled(
-        _get_reduce_kernel(nq, nkv, niq, rotary_dim, token_pairs, split_k),
+        _launcher(n, (nq, nkv, niq), split_k=split_k),
         slab.data_ptr(),
         q_out.data_ptr(),
         index_q_out.data_ptr(),
@@ -280,7 +311,7 @@ def warmup_prefill_kernels(
     rotary_dim: int = 64,
     device=None,
 ) -> str | None:
-    """Compiles the prefill variants at init (root README rule 4: graph capture reaches only the main kernel) by
+    """Compiles the prefill variants at init (root README rule 4: graph capture reaches only the decode tiles) by
     launching each tile on a zero batch with slots -1, which writes no page. A layer ``insert_blocker`` rejects
     compiles nothing: returns that reason (the caller keeps its stock path), else None."""
     device = device or torch.device("cuda")
@@ -288,7 +319,7 @@ def warmup_prefill_kernels(
     why = insert_blocker(nq, nkv, niq, rotary_dim)
     if why is not None:
         return why
-    for n in (PREFILL_TOKENS, STREAMING_PREFILL_RANGE[0]):
+    for n in (PREFILL_TOKENS, STREAMING_PREFILL_RANGE[0]) if (nq, nkv, niq) == TP4 else (513,):
         row = (nq + 2 * nkv + niq + 1) * _kernel.D
         qkv = torch.zeros((n, row), dtype=torch.bfloat16, device=device)
         w = torch.zeros(_kernel.D, dtype=torch.bfloat16, device=device)

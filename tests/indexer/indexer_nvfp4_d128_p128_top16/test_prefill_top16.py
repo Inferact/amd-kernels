@@ -91,11 +91,21 @@ SERVED = [
 ]
 
 
-@pytest.mark.parametrize("q_lens,seq_lens", SERVED, ids=[f"{a}-{b}".replace(" ", "") for a, b in SERVED])
+# two heads (TP2): the scorer plans of ``score_prefill.host.H2_MQ1_WORK`` (128-row and 256-row shared tiles, 512-row)
+SERVED_H2 = [
+    ([64], [64]),
+    ([2048], [2048]),
+    ([1024], [33792]),
+    ([3000, 700], [20000, 30000]),
+    ([8192], [73728]),
+]
+CASES = [(1, *c) for c in SERVED] + [(2, *c) for c in SERVED + SERVED_H2]
+
+
+@pytest.mark.parametrize("heads,q_lens,seq_lens", CASES, ids=[f"h{h}-{a}-{b}".replace(" ", "") for h, a, b in CASES])
 @torch.inference_mode()
-def test_reference(q_lens, seq_lens):
+def test_reference(heads, q_lens, seq_lens):
     require_gfx950()
-    heads = 1
     torch.manual_seed(sum(q_lens) + heads)
     q, cache, table, cu, seq, pos, nvp = make_case(q_lens, seq_lens, heads)
     out = entry(q, cache, table, cu, seq, q_lens, seq_lens, nvp)

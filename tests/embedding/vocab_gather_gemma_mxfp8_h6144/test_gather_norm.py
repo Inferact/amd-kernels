@@ -7,7 +7,7 @@ from amd_kernels.embedding.vocab_gather_h6144 import VocabGather
 from amd_kernels.embedding.vocab_gather_gemma_mxfp8_h6144 import vocab_gather_gemma_mxfp8,warmup_vocab_gather_gemma_mxfp8
 from amd_kernels.embedding.vocab_gather_gemma_mxfp8_h6144.reference import lookup_reference
 from amd_kernels.norm.gemma_rmsnorm_bf16_mxfp8_h6144 import gemma_rmsnorm_mxfp8
-from tests.multi_gpu import run_on_4_gpus
+from tests.multi_gpu import run_on_2_gpus, run_on_4_gpus
 
 
 def written(q,s,m,tile):
@@ -25,8 +25,10 @@ def worker(rank,errors):
     from tests.mfma_spinner import mfma_spinner
     torch.set_num_threads(8)
     dev=torch.device('cuda',rank)
+    world=dist.get_world_size()
+    vocab=world*128
     gen=torch.Generator().manual_seed(963)
-    shards=[(torch.randn((128,6144),generator=gen)*torch.exp2(torch.randint(-5,6,(128,192,1),generator=gen).expand(128,192,32).reshape(128,6144).float())).bfloat16() for _ in range(4)]
+    shards=[(torch.randn((128,6144),generator=gen)*torch.exp2(torch.randint(-5,6,(128,192,1),generator=gen).expand(128,192,32).reshape(128,6144).float())).bfloat16() for _ in range(world)]
     for shard in shards:
         shard[0].zero_()
         shard[1,:8]=torch.tensor([0.,-0.,2.**-133,-2.**-133,2.**-126,-2.**-126,1.,-1.],dtype=torch.bfloat16)
@@ -48,9 +50,9 @@ def worker(rank,errors):
         for dtype in (torch.int32,torch.int64):
             for tile in (0,16):
                 for m in (0,1,7,33,70,112,224,448,512,513,896,1792,2048):
-                    ids=torch.randint(-2,514,(m,),generator=gen,dtype=dtype)
+                    ids=torch.randint(-2,vocab+2,(m,),generator=gen,dtype=dtype)
                     if m:ids[0]=0
-                    if m>7:ids[:7]=torch.tensor([0,1,128,256,384,-1,512])
+                    if m>7:ids[:7]=torch.tensor([0,1,128,vocab-128,vocab-1,-1,vocab])
                     inputs=ids.to(dev)
                     raw=lookup(inputs)
                     q,s=gemma_rmsnorm_mxfp8(raw,norm,1e-6,tile)
@@ -87,7 +89,7 @@ def worker(rank,errors):
                 if base is None:base=(aq[0].clone(),bs[0].clone())
                 assert torch.equal(aq,base[0].expand_as(aq)) and torch.equal(bs,base[1].expand_as(bs))
         for m in (7,896):
-            ids=torch.arange(m,device=dev,dtype=torch.int32)%512
+            ids=torch.arange(m,device=dev,dtype=torch.int32)%vocab
             ref=vocab_gather_gemma_mxfp8(ids,lookup,norm)
             torch.cuda.synchronize()
             spinner(100_000,side)
@@ -100,3 +102,6 @@ def worker(rank,errors):
 
 
 def test_peer_lookup_norm_quant():run_on_4_gpus(worker,timeout=300)
+
+
+def test_peer_lookup_norm_quant_ranks2():run_on_2_gpus(worker,timeout=300)

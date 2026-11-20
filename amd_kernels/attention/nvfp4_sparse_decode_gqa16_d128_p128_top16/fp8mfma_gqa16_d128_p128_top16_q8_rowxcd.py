@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the amd-kernels project
-"""``fp8/kernel.py`` at 8 rows per request, 16 query heads, 1 KV head, 4 splits, rows spread over the 8 XCDs.
+"""``fp8/kernel.py`` at 8 rows per request, 16 query heads per KV head, 1 or 2 KV heads (``hkv``), 4 splits, rows
+spread over the 8 XCDs.
 
 What ``bf16mfma_gqa16_d128_p128_top16_q8_rowxcd.py`` is to kernel.py: row bx runs on XCD bx % 8 and a row's splits share
 it; the first block's loads issue before the table barrier, and the V table words are consumed together. The Q / K / V /
@@ -28,8 +29,11 @@ def compile_nvfp4_fp8mfma_gqa16_d128_p128_top16_q8_rowxcd(
     xcds: int = 0,
     quant: bool = False,
     tail: bool = False,
+    hkv: int = 1,
 ):
     """The launcher; the host's ``fp8/kernel.py`` key at splits 4, topk 16, xcds 8, no tail."""
+    assert hkv in (1, 2), hkv
+    HKV = hkv
     assert splits == 4 and topk == 16 and xcds == 8 and not tail
     assert 1 <= topk <= 64 and splits >= 1
     assert not tail or xcds > 0, "the tail grid places a pair's splits by XCD"
@@ -42,6 +46,7 @@ def compile_nvfp4_fp8mfma_gqa16_d128_p128_top16_q8_rowxcd(
         + (f"_xcd{XCDS}" if XCDS else "")
         + ("_mxfp8" if quant else "")
         + ("_tail" if tail else "")
+        + ("_kv2" if HKV == 2 else "")
     )
 
     name += "_vlut"
@@ -150,8 +155,8 @@ def compile_nvfp4_fp8mfma_gqa16_d128_p128_top16_q8_rowxcd(
         i32_tpx: fx.Int32,  # tail: tail pairs per XCD
     ):
         smem = fx.SharedAllocator().allocate(Shared).peek()
-        i32_H = fx.Int32(16)
-        i32_hkv = fx.Int32(1)
+        i32_H = fx.Int32(16 * HKV)
+        i32_hkv = fx.Int32(HKV)
         tx = fx.thread_idx.x
         bx, kvh = fx.block_idx.x, fx.block_idx.y
         lane = tx % 64

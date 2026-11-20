@@ -4,7 +4,9 @@
 
 Served shapes (README, "What it does"): TP4 (16 query heads, 1 KV head, 128-token
 pages): spec3 = 4 rows per request, bf16 output; the DSpark draft's 7-row block, causal
-and non-causal, with the MXFP8 epilogue for o_proj. Every case: each request and KV head
+and non-causal, with the MXFP8 epilogue for o_proj. TP2 (32 query heads, 2 KV heads): the
+7-row and 3-row blocks at every tier of ``host._TP2_PLANS`` (query tiles, LDS-ring kernel,
+request-wide kernel), with the MXFP8 epilogue for o_proj (K 4096). Every case: each request and KV head
 against the fp64 reference, three launches bit for bit equal, and a CUDA graph replayed
 into NaN-filled outputs. The batches carry e4m3 NaN bytes in every slot past a sequence
 end (the kernel must not read them) and, in the ragged cases, padding requests
@@ -71,6 +73,28 @@ CASES = [
     ("tp4_r7_ragged_p128_noncausal_r28", 28, (7, 1, 3, 2, 4, 5, 6), 1, 128, False, 3),
     # ragged rows (a combining wave reused, a partial last row group) + padding requests
     ("ragged_781_p128_r9", 9, (7, 8, 1), 1, 128, False, 3),
+]
+# TP2 (32 / 2 heads): every boundary of host._TP2_PLANS, ragged blocks and padding requests
+CASES += [
+    (f"tp2_r7_p128_noncausal_r{r}", r, 7, 2, 128, False, 0)
+    for r in (1, 2, 3, 4, 5, 6, 7, 10, 11, 16, 17, 32, 33, 40, 41, 64, 65, 100)
+] + [
+    (f"tp2_r7_p128_r{r}", r, 7, 2, 128, True, 0) for r in (1, 5, 11, 17, 33, 41, 65)
+] + [
+    (f"tp2_r7_ragged_p128{'' if c else '_noncausal'}_r{r}", r, (7, 1, 3, 2), 2, 128, c, pad)
+    for r, pad in ((4, 1), (7, 3), (20, 3), (45, 3), (70, 3))
+    for c in (True, False)
+] + [
+    ("tp2_r7_ragged_p128_noncausal_r28", 28, (7, 1, 3, 2, 4, 5, 6), 2, 128, False, 3),
+    ("tp2_r7_ragged_p128_r100", 100, (7, 1, 3, 2, 4, 5, 6), 2, 128, True, 5),
+] + [
+    (f"tp2_r3_p128_noncausal_r{r}", r, 3, 2, 128, False, 0)
+    for r in (1, 4, 5, 8, 9, 16, 17, 24, 25, 32, 33, 64, 65, 128, 129)
+] + [
+    (f"tp2_r3_p128_r{r}", r, 3, 2, 128, True, 0) for r in (1, 17, 65)
+] + [
+    ("tp2_r3_ragged_p128_noncausal_r10", 10, (3, 1, 2), 2, 128, False, 2),
+    ("tp2_ragged_781_p128_r9", 9, (7, 8, 1), 2, 128, False, 3),
 ]
 OPROJ_N = 6144  # the TP4 o_proj (N 6144, K 2048)
 
@@ -141,16 +165,19 @@ def launch(batch, max_ql, causal, out=None, quant_out=None, **kw):
 
 
 def spy_names(monkeypatch):
-    """The kernel names ``host._get_kernel`` hands out."""
+    """The kernel names ``host._get_kernel`` / ``host._get_ring_kernel`` hand out."""
     names = []
-    real = host._get_kernel
 
-    def spy(*args):
-        exe = real(*args)
-        names.append(exe.kernel_name)
-        return exe
+    def spy(real):
+        def get(*args):
+            exe = real(*args)
+            names.append(exe.kernel_name)
+            return exe
 
-    monkeypatch.setattr(host, "_get_kernel", spy)
+        return get
+
+    monkeypatch.setattr(host, "_get_kernel", spy(host._get_kernel))
+    monkeypatch.setattr(host, "_get_ring_kernel", spy(host._get_ring_kernel))
     return names
 
 
@@ -202,7 +229,7 @@ def test_decode_contract(name, reqs, ql, hkv, page, causal, pad, monkeypatch):
     torch.cuda.synchronize()
     # the dispatched kernel: rows, page, causal, the planned split count
     (kname,) = set(names)
-    splits = host.launch_splits(q, batch[0], len(batch[2]))
+    splits = host.launch_splits(q, batch[0], len(batch[2]), max_query_len=max_ql)
     assert f"_r{max_ql}_" in kname and f"_s{splits}_w{W}_p{page}_" in kname, kname
     assert ("_c" in kname.split("_n", 1)[1]) == causal, kname
     assert same_bits(outs[0], outs[1]) and same_bits(outs[0], outs[2]), name
@@ -213,8 +240,8 @@ def test_decode_contract(name, reqs, ql, hkv, page, causal, pad, monkeypatch):
         assert same_bits(out, outs[0]), name
 
 
-# the MXFP8 epilogue's served query block: 7 rows a request, 1 KV head, 128-token pages
-QUANT_CASES = [c for c in CASES if c[2] == 7 and c[3] == 1]
+# the MXFP8 epilogue's served query blocks: TP4 7 rows a request, 1 KV head; TP2 7 and 3 rows, 2 KV heads
+QUANT_CASES = [c for c in CASES if (c[2] == 7 and c[3] == 1) or (c[2] in (3, 7) and c[3] == 2)]
 
 
 @pytest.mark.parametrize("name,reqs,ql,hkv,page,causal,pad", QUANT_CASES, ids=[c[0] for c in QUANT_CASES])
@@ -271,6 +298,10 @@ def test_supports_bounds():
     assert not supports_swa_decode_fp8kv(q, cache, MAX_QL + 1, W)
     assert not supports_swa_decode_fp8kv(q[:, :12], cache, 8, W)  # 12 query heads per KV head
     assert not supports_swa_decode_fp8kv(q, cache[:, :, :80], 8, W)  # page not a multiple of 32
+    q2 = torch.empty((8, 32, D), dtype=torch.bfloat16, device="cuda")
+    cache2 = torch.empty((4, 2, 128, 2 * D), dtype=torch.uint8, device="cuda")
+    assert supports_swa_decode_fp8kv(q2, cache2, 7, W) and supports_swa_decode_fp8kv(q2, cache2, 3, W)
+    assert not supports_swa_decode_fp8kv(q2, cache, 7, W)
 
 
 @pytest.mark.parametrize("causal", [True, False], ids=["causal", "noncausal"])
@@ -293,6 +324,44 @@ def test_tp4_q7_batch_combine_next_to_mfma(reqs, causal):
             launch(batch, 7, causal, out)
         torch.cuda.synchronize()
         assert torch.equal(out, expected)
+
+
+@pytest.mark.parametrize("causal", [True, False], ids=["causal", "noncausal"])
+@pytest.mark.parametrize(
+    "ql,reqs", [(7, r) for r in (1, 6, 16, 17, 33, 41, 64, 65)] + [(3, r) for r in (1, 17, 64, 129)]
+)
+@torch.inference_mode()
+def test_tp2_combine_next_to_mfma(ql, reqs, causal):
+    """TP2 plans (query tiles, LDS-ring splits, ticket combine) give the same bits with an MFMA spinner on every CU."""
+    from tests.mfma_spinner import mfma_spinner
+
+    require_gfx950()
+    gen = torch.Generator().manual_seed(127 + reqs)
+    batch = make_batch(reqs, ql, 0, gen, 128, 2)
+    expected = torch.empty_like(batch[4])
+    launch(batch, ql, causal, expected)
+    main, side = torch.cuda.Stream(), torch.cuda.Stream(priority=-1)
+    spin = mfma_spinner(torch.cuda.get_device_properties(0).multi_processor_count)
+    for _ in range(8):
+        spin(200_000, side)
+        with torch.cuda.stream(main):
+            out = torch.empty_like(expected)
+            launch(batch, ql, causal, out)
+        torch.cuda.synchronize()
+        assert torch.equal(out, expected)
+
+
+def test_tp2_plans_fit_the_scratch():
+    """Every TP2 plan (1-256 requests) fits the tickets and split partials, and the tables are ordered."""
+    for ql, plan in host._TP2_PLANS.items():
+        lasts = [last for last, _, _ in plan]
+        assert lasts[-1] is None and lasts[:-1] == sorted(lasts[:-1])
+        for reqs in range(1, 257):
+            splits, ring_rows, batch_rows, group_rows = host._plan(reqs, 2, 128, ql, W, False, 8, 256, 4, None)
+            assert not batch_rows
+            work = -(-reqs * ({1: 7, 2: 4, 3: 3}[group_rows] if group_rows else 1) // 8) * 8 * 2
+            rows = group_rows or ql
+            assert work <= host.MAX_SPLIT_WGS and work * splits * rows <= host.MAX_SPLIT_WGS * MAX_QL, (ql, reqs)
 
 
 @pytest.mark.parametrize("causal", [True, False], ids=["causal", "noncausal"])
@@ -338,7 +407,7 @@ def test_tp4_q7_group_cross_batch_cosine():
 def test_layer_blocker():
     from amd_kernels.attention.swa_decode_fp8kv_gqa16_d128 import layer_blocker
 
-    for heads, kv_heads, window in ((16, 1, 4096), (16, 1, max_window(MAX_QL))):
+    for heads, kv_heads, window in ((16, 1, 4096), (16, 1, max_window(MAX_QL)), (32, 2, 4096)):
         assert layer_blocker(128, heads, kv_heads, window) is None
     for args in ((64, 16, 1, 4096), (128, 8, 1, 4096), (128, 16, 2, 4096), (128, 16, 1, None), (128, 16, 1, 0),
                  (128, 16, 1, max_window(MAX_QL) + 1)):

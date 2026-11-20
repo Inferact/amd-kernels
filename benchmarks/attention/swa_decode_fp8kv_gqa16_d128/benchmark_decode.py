@@ -12,7 +12,8 @@ and the last launch are checked against ``reference.py`` before timing.
 
 Cases (README, "What it does"): TP4 spec3 (16 / 1 heads, 4 rows, bf16 output,
 128-token pages); the TP4 DSpark draft's 7-row block, causal and non-causal (the
-upstream vLLM draft). The MXFP8 epilogue with o_proj: ``benchmarks/attention/bench_attn_oproj_mxfp8.py``.
+upstream vLLM draft); TP2 (32 / 2 heads) DSpark 7 and DSpark 3 blocks. The MXFP8 epilogue with o_proj:
+``benchmarks/attention/bench_attn_oproj_mxfp8.py`` (TP4), ``benchmark_oproj_input.py`` (TP2).
 """
 
 import argparse
@@ -37,6 +38,9 @@ CASES = [
     ("tp4_spec3_p128_bf16", 4, 1, 128, [1, 16, 64, 128, 256]),
     ("tp4_dspark7_p128_bf16", 7, 1, 128, [1, 2, 4, 16, 32, 64]),
     ("tp4_dspark7_noncausal_p128_bf16", 7, 1, 128, [1, 2, 4, 8, 11, 16, 24, 32, 48, 64], False),
+    ("tp2_dspark7_noncausal_p128_bf16", 7, 2, 128, [1, 2, 4, 8, 16, 24, 32, 40, 48, 56, 64, 96, 128, 256], False),
+    ("tp2_dspark7_p128_bf16", 7, 2, 128, [1, 4, 16, 32, 48, 64, 128]),
+    ("tp2_dspark3_noncausal_p128_bf16", 3, 2, 128, [1, 4, 16, 32, 48, 64, 128], False),
 ]
 
 
@@ -115,7 +119,7 @@ def bench(name, ql, hkv, page, reqs, copies, scales, causal=True):
             check_close(out[sl], ref[sl], f"{name} R={reqs} launch {i} KV head {h}")
     us = timeit_graph([lambda i=i: call(i) for i in range(copies)]) * 1e3
     kv_bytes = reqs * hkv * (W - 1 + ql) * TOK_B
-    splits = host.launch_splits(launches[0][3], pool, reqs)
+    splits = host.launch_splits(launches[0][3], pool, reqs, max_query_len=ql, window=W)
     print(
         f"{name:22s} R={reqs:3d} rows={rows:4d} splits={splits}: "
         f"{us:7.2f} us, {kv_bytes / us / 1e3:6.0f} GB/s KV"

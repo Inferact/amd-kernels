@@ -25,6 +25,10 @@ SERVED = [
     # upstream vLLM's DSpark draft block (non-causal), TP4 up to 256 requests
     ("tp4_spec7_noncausal_p128", 7, 1, 128, False, range(1, 257)),
     ("tp4_spec3_p128", 4, 1, 128, True, range(1, 257)),
+    # TP2 (32 / 2 heads): the DSpark 7 and DSpark 3 blocks (host._TP2_PLANS)
+    ("tp2_spec7_p128", 7, 2, 128, True, range(1, 257)),
+    ("tp2_spec7_noncausal_p128", 7, 2, 128, False, range(1, 257)),
+    ("tp2_spec3_noncausal_p128", 3, 2, 128, False, range(1, 257)),
 ]
 
 
@@ -57,6 +61,8 @@ def test_no_compile_after_warmup(name, ql, hkv, page, causal, served, monkeypatc
     out = torch.empty_like(q)
 
     def variant(reqs):
+        if hkv == 2:
+            return host._plan(reqs, hkv, page, ql, 4096, causal, 8, host._cu_count(q.device), 4, None)
         tile = host._tp4_q7_rows(reqs) if ql == 7 and hkv == 1 and page == 128 else 0
         return host.launch_splits(q, full[0], reqs), tile
 

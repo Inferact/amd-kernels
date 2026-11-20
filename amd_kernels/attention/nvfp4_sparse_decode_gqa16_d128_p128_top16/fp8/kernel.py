@@ -115,17 +115,21 @@ def compile_nvfp4_fp8mfma_sparse_decode(
     tail: bool = False,
     prefetch: bool = False,
     q8: bool = False,
+    hkv: int = 1,
 ):
     """The launcher of one variant; the other arguments as ``kernel.compile_nvfp4_sparse_decode``'s.
 
     Args:
         prefetch: issue the first block's loads before the table barrier (the host sets it at <= one workgroup per
             CU; with more workgroups the overlap lost).
-        q8: fold the request arithmetic for 8 rows per request, 16 query heads, 1 KV head (the host checks it).
+        q8: fold the request arithmetic for 8 rows per request, 16 query heads per KV head, ``hkv`` (1 or 2) KV heads
+            (the host checks it).
     """
     assert 1 <= topk <= 64 and splits >= 1
     assert not tail or xcds > 0, "the tail grid places a pair's splits by XCD"
     SPLITS, TOPK, XCDS, TAIL, PREFETCH, Q8 = splits, topk, xcds, tail, prefetch, q8
+    assert hkv in (1, 2) and (Q8 or hkv == 1), (hkv, q8)
+    HKV = hkv
     # Pair order removes 16 K interleave permutations per block. At <= one workgroup per CU the V table reads are
     # batched before their first consumer; otherwise LLVM serializes them and hides the instruction saving.
     PAIR = Q8
@@ -139,6 +143,7 @@ def compile_nvfp4_fp8mfma_sparse_decode(
         + ("_tail" if tail else "")
         + ("_prefetch" if prefetch else "")
         + ("_q8" if q8 else "")
+        + ("_kv2" if HKV == 2 else "")
     )
 
     name += "_vlut"
@@ -248,10 +253,10 @@ def compile_nvfp4_fp8mfma_sparse_decode(
     ):
         smem = fx.SharedAllocator().allocate(Shared).peek()
         if const_expr(Q8):
-            # the served shape: 8 rows per request, 16 query heads, 1 KV head
+            # the served shape: 8 rows per request, 16 query heads per KV head, HKV KV heads
             i32_ql = fx.Int32(8)
-            i32_H = fx.Int32(16)
-            i32_hkv = fx.Int32(1)
+            i32_H = fx.Int32(16 * HKV)
+            i32_hkv = fx.Int32(HKV)
         tx = fx.thread_idx.x
         bx, kvh = fx.block_idx.x, fx.block_idx.y
         lane = tx % 64

@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the amd-kernels project
-"""``gemm.tuned_shapes``: the (N, K) shapes with dtype-specific rows, the set a caller switches by shape."""
+"""``gemm.tuned_shapes``: the (N, K) shapes with dtype-specific rows (the shape folders' ``ROWS``), the
+set a caller switches by shape."""
 import pytest
 import torch
 
@@ -8,6 +9,7 @@ from amd_kernels.gemm.mxfp8_common import gemm as G
 
 # MiniMax-M3.1 TP4: qkv, o_proj, dense gate_up, dense down, shared gate_up, shared down, DSpark draft qkv
 TP4 = {(2560, 6144), (6144, 2048), (6144, 6144), (6144, 3072), (1536, 6144), (6144, 768), (2304, 6144)}
+
 
 
 def test_bf16_is_the_tables_bf16_keys():

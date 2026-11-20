@@ -1,12 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the amd-kernels project
-"""Run a test body on 4 GPUs: one process per GPU, a gloo process group (a TCPStore on a free local port: AITER's
-custom all-reduce exchanges its IPC handles through a pure TCP store). The 4 rank processes start at the first call
-and serve every later call of the same pytest process (a call of its own would pay for 4 new ones: Python, torch, a
-HIP context, the group and the body's warm-up again). A failed call kills them; the next call starts new ones. A body
-sees what earlier calls of its file left in the process (as it already saw their FlyDSL disk cache). The body
-appends mismatches to ``errors`` instead of raising, so every rank reaches the same collectives; an exception is
-recorded and ends that rank."""
+"""Run a test body on 2 or 4 GPUs: one process per GPU, a gloo process group (a TCPStore on a free local port:
+AITER's custom all-reduce exchanges its IPC handles through a pure TCP store). The rank processes start at the first
+call and serve every later call of the same world size in the same pytest process (a call of its own would pay for
+new ones: Python, torch, a HIP context, the group and the body's warm-up again). A failed call kills them; the next
+call starts new ones. A body sees what earlier calls of its file left in the process (as it already saw their FlyDSL
+disk cache). The body appends mismatches to ``errors`` instead of raising, so every rank reaches the same
+collectives; an exception is recorded and ends that rank."""
 
 import atexit
 import os
@@ -23,7 +23,7 @@ import torch.multiprocessing as mp
 WORLD = 4
 
 
-CPU_THREADS = 8  # per rank: 4 ranks x all cores of torch's default spin on each other
+CPU_THREADS = 8  # per rank: ranks on all cores (torch's default) spin on each other
 EXIT_GRACE_S = 10  # after one rank failed: how long the others get to report before all are killed
 
 
@@ -37,11 +37,11 @@ def _free_port() -> int:
         return s.getsockname()[1]
 
 
-def _serve(rank, port, jobs, results):
+def _serve(rank, world, port, jobs, results):
     torch.set_num_threads(CPU_THREADS)
     torch.cuda.set_device(rank)
     dist.init_process_group(
-        "gloo", init_method=f"tcp://127.0.0.1:{port}", rank=rank, world_size=WORLD
+        "gloo", init_method=f"tcp://127.0.0.1:{port}", rank=rank, world_size=world
     )
     parent = os.getppid()
     while True:
@@ -70,17 +70,18 @@ def _serve(rank, port, jobs, results):
 
 
 class _Ranks:
-    """The 4 rank processes, one job queue each, one result queue."""
+    """The rank processes, one job queue each, one result queue."""
 
-    def __init__(self):
+    def __init__(self, world):
+        self.world = world
         ctx = mp.get_context("spawn")
         self.env = _env()
         self.results = ctx.Queue()
-        self.jobs = [ctx.Queue() for _ in range(WORLD)]
+        self.jobs = [ctx.Queue() for _ in range(world)]
         port = _free_port()
         self.procs = [
-            ctx.Process(target=_serve, args=(r, port, self.jobs[r], self.results))
-            for r in range(WORLD)
+            ctx.Process(target=_serve, args=(r, world, port, self.jobs[r], self.results))
+            for r in range(world)
         ]
         for p in self.procs:
             p.start()
@@ -91,7 +92,7 @@ class _Ranks:
             q.put((fn, args))
         done = {}
         deadline = time.monotonic() + timeout
-        while len(done) < WORLD and time.monotonic() < deadline:
+        while len(done) < self.world and time.monotonic() < deadline:
             try:
                 rank, errors, ok = self.results.get(timeout=1)
                 done[rank] = (errors, ok)
@@ -125,23 +126,33 @@ def _close_ranks():
         _ranks = None
 
 
-def run_on_4_gpus(fn, *args, timeout=900):
-    """``fn(rank, errors, *args)`` on 4 GPUs; fails on any recorded error, an
+def run_on_gpus(fn, *args, world, timeout=900):
+    """``fn(rank, errors, *args)`` on ``world`` GPUs; fails on any recorded error, an
     exception, a rank that exits or a timeout."""
     global _ranks
-    if torch.cuda.device_count() < WORLD:
-        pytest.skip("needs 4 GPUs")
-    if _ranks is not None and _ranks.env != _env():
-        _close_ranks()  # the ranks run with the environment they started with
+    if torch.cuda.device_count() < world:
+        pytest.skip(f"needs {world} GPUs")
+    if _ranks is not None and (_ranks.env != _env() or _ranks.world != world):
+        _close_ranks()  # the ranks run with the environment and world they started with
     if _ranks is None:
-        _ranks = _Ranks()
+        _ranks = _Ranks(world)
     done = _ranks.run(fn, args, timeout)
     msgs = [m for r in sorted(done) for m in done[r][0]]
-    ok = len(done) == WORLD and all(o for _, o in done.values()) and not msgs
+    ok = len(done) == world and all(o for _, o in done.values()) and not msgs
     if not ok:
         codes = [p.exitcode for p in _ranks.procs]
         _ranks.close(kill=True)
         _ranks = None
-        missing = [r for r in range(WORLD) if r not in done]
+        missing = [r for r in range(world) if r not in done]
         assert not missing, f"ranks {missing} did not finish in {timeout} s (exit codes {codes}); {msgs[:4]}"
         assert not msgs, "\n".join(msgs[:8])
+
+
+def run_on_4_gpus(fn, *args, timeout=900):
+    """``fn(rank, errors, *args)`` on 4 GPUs."""
+    run_on_gpus(fn, *args, world=4, timeout=timeout)
+
+
+def run_on_2_gpus(fn, *args, timeout=900):
+    """``fn(rank, errors, *args)`` on 2 GPUs."""
+    run_on_gpus(fn, *args, world=2, timeout=timeout)

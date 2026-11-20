@@ -25,10 +25,12 @@ D = 128
 # (id, query heads, KV heads, page, served token counts)
 QKV_SERVED = [
     ("tp4_p128", 16, 1, 128, [4, 12, 100, 400, 1024]),
+    ("tp2_p128", 32, 2, 128, [4, 12, 100, 400, 1024, 2048]),
 ]
 # (id, KV heads, page, served context-row counts)
 ML_SERVED = [
     ("tp4_p128", 1, 128, [4, 64, 384, 4096]),
+    ("tp2_p128", 2, 128, [4, 64, 384, 4096, 8192]),
 ]
 
 

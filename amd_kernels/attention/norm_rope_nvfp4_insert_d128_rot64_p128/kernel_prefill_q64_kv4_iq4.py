@@ -37,6 +37,9 @@ from .kernel import (
 )
 
 
+NT_Q_TILES = ((16, 1, 1, 64, 4), (16, 1, 1, 64, 8), (32, 2, 2, 64, 4))  # (nq, nkv, niq, rotary_dim, pairs)
+
+
 def _half_lane(v, k, lane):
     """Lane k (lanes < 32) / lane 32 + k (lanes >= 32) of the i32 ``v``: the value
     the half-wave's own lane k holds."""
@@ -78,8 +81,8 @@ def compile_norm_rope_insert(nq: int, nkv: int, niq: int, rotary_dim: int, tp: i
     HALF = rotary_dim // 2
     SIDE = nkv * BLK * 72  # one side of a main page (bytes)
     TPW = 2 * tp  # tokens per wave
-    # nt q / index-q stores on the q16 bf16 tiles: QKV chain 2048 / 3072 / 6144 tokens -2.7 / -3.3 / -1.4%
-    Q_STORE_CM = 2 if (nq, nkv, niq, rotary_dim) == (16, 1, 1, 64) and tp in (4, 8) else 0
+    # nt q / index-q stores: q16 QKV chain -1.4..-3.3% at 2048-6144 tokens, q32 insert -2..-12% at 513-32768
+    Q_STORE_CM = 2 if (nq, nkv, niq, rotary_dim, tp) in NT_Q_TILES else 0
     name = (
         f"norm_rope_nvfp4_insert_prefill_d128_p128_q{nq}_kv{nkv}_iq{niq}"
         f"_rot{rotary_dim}_pairs{tp}"

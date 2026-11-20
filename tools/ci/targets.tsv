@@ -25,6 +25,7 @@ collectives/pull_collectives_ranks4/test_norm_gather_h6144.py	4
 collectives/pull_collectives_ranks4/test_unpack_q2048_shuffled.py	4
 collectives/seq_parallel_handoffs_h6144_q2048_ranks4/test_handoffs.py	4
 collectives/sdma_push_ranks4/test_transport.py	4
+collectives/sdma_push_ranks4/test_agents.py	4
 collectives/seq_parallel_handoffs_h6144_q2048_ranks4/test_warm_up.py	4
 collectives/seq_parallel_handoffs_h6144_q2048_ranks4/test_shard.py	4
 norm/gemma_add_rmsnorm_h6144/test_stream_hoist_weight.py	4
@@ -38,6 +39,27 @@ norm/gemma_add_rmsnorm_h6144/test_decoder_tail_ranks4.py	4
 norm/gemma_add_rmsnorm_h6144/test_slots4_ar_add_rmsnorm.py	4
 norm/gemma_add_rmsnorm_h6144/test_slots4_lossless.py	4
 
+indexer/indexer_nvfp4_d128_p128_top16/test_split2_ranks2.py	2
+moe/mxfp4_h6144_i1536_e128_top4/test_gather_ranks2.py	2
+collectives/pull_collectives_ranks2	2
+collectives/sdma_push_ranks2	2
+collectives/seq_parallel_handoffs_h6144_q4096_ranks2/test_handoffs.py	2
+collectives/seq_parallel_handoffs_h6144_q4096_ranks2/test_shard.py	2
+collectives/seq_parallel_handoffs_h6144_q4096_ranks2/test_dbo.py	2
+collectives/seq_parallel_handoffs_h6144_q4096_ranks2/test_coded_tail.py	2
+collectives/seq_parallel_handoffs_h6144_q4096_ranks2/test_warm_up.py	2
+collectives/all_to_all_bf16_n100032_ranks2/test_exchange.py	2
+collectives/all_gather_sampler_i64_c8_ranks2/test_sampler_gather.py	2
+collectives/all_gather_i64_c7_ranks2/test_i64_c7_gather.py	2
+norm/allreduce_gemma_bf16_mxfp8_h6144_ranks2	2
+norm/gemma_add_rmsnorm_h6144/test_ranks2_staged.py	2
+norm/gemma_add_rmsnorm_h6144/test_ranks2_slots4.py	2
+norm/gemma_add_rmsnorm_h6144/test_ranks2_compile.py	2
+norm/gemma_add_rmsnorm_h6144/test_ranks2_decoder_tail.py	2
+gemm/bf16_concat_linear_n3072_k30720/test_gather.py	2
+gemm/bf16_concat_linear_n3072_k30720/test_compile.py	2
+gemm/bf16_n100032_k6144/test_publish.py	2		python3 -c "import tests, torch; from amd_kernels.gemm.bf16_n100032_k6144 import warmup_bf16_gemm_n100032_k6144 as w; [w(torch.device('cuda'), True, m) for m in ('contiguous', 'publish')]"
+
 # compile tests: compile-only mode, sharing one card (the same FlyDSL compiles, kernel and cache key, as a normal run)
 attention/norm_rope_fp8_insert_d128_rot64/test_compile.py	compile
 attention/norm_rope_nvfp4_insert_d128_rot64_p128/test_compile.py	compile
@@ -47,11 +69,17 @@ attention/swa_decode_fp8kv_gqa16_d128/test_compile.py	compile
 gemm/mxfp8_common/test_compile.py	compile
 indexer/indexer_nvfp4_d128_p128_top16/test_compile.py	compile
 moe/mxfp4_h6144_i768_e128_top4/test_compile_entry.py	compile
+moe/mxfp4_h6144_i1536_e128_top4/test_compile_entry.py	compile
 norm/gemma_add_rmsnorm_h6144/test_compile.py	compile
 
 # precompiled targets: their cold time is mostly compile (cold -> warm: test_moe 528 -> 21 s, test_gemm 347 -> 15,
 # test_dispatch 194 -> 8 (AITER's hipcc build of its CK module), test_publish 178 -> 17)
 gemm/bf16_n50016_k6144/test_gemm.py	1		same
+gemm/bf16_n100032_k6144/test_gemm.py	1		same
+gemm/mxfp8_common/test_shape_rows.py	1		same
 attention/nvfp4_sparse_decode_gqa16_d128_p128_top16/test_index_decode_ranks4.py	4
 sampling/batch_sharded_markov_v200064_h6144_r256_ranks4/test_batch_sharded.py	4
 decoder/dense_mxfp8_h6144_i3072_ranks4/test_decoder_ranks4.py	4
+attention/nvfp4_sparse_decode_gqa16_d128_p128_top16/test_index_decode_ranks2.py	2
+sampling/batch_sharded_markov_v200064_h6144_r256_ranks2/test_batch_sharded.py	2
+decoder/dense_mxfp8_h6144_i6144_ranks2/test_decoder_ranks2.py	2

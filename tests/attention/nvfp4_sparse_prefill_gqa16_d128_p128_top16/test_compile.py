@@ -16,14 +16,17 @@ import pytest
 import torch
 
 from amd_kernels.attention.nvfp4_sparse_prefill_gqa16_d128_p128_top16.query import pack_query
-from .cases import TP4_HKV, make_case, require_gfx950
+from .cases import TP2_HKV, TP4_HKV, make_case, require_gfx950
 from .test_sparse_prefill import case_slice, run, run_pack, run_quant
 
-# served prefill tokens per step: max-num-batched-tokens 65536 (TP4)
-RANGES = {TP4_HKV: range(1, 65537)}
+# served prefill tokens per step: max-num-batched-tokens 65536 (TP4, TP2)
+RANGES = {TP4_HKV: range(1, 65537), TP2_HKV: range(1, 65537)}
 PROBES = 6
 # (compute dtype, KV heads, output mode): pack is the sequence-parallel TP4 prefill's
-CONFIGS = [(variant, TP4_HKV, mode) for variant in ("bf16", "fp16") for mode in ("plain", "quant", "pack")]
+CONFIGS = [(variant, TP4_HKV, mode) for variant in ("bf16", "fp16") for mode in ("plain", "quant", "pack")] + [
+    (variant, TP2_HKV, mode) for variant in ("bf16", "fp16") for mode in ("plain", "quant")]
+# Hkv 2 small tiles: (most tokens, queries per workgroup, shared Q)
+TP2_TILES = ((128, 1, False), (256, 2, True), (384, 3, False), (512, 2, True), (768, 3, False))
 
 
 def variant_key(variant, hkv, mode, t):
@@ -32,6 +35,9 @@ def variant_key(variant, hkv, mode, t):
     rounds = 2 if (t + 3) // 4 * hkv > cus else 1
     if variant in ("bf16", "fp16") and hkv == TP4_HKV and t <= 1536:
         return (variant, mode == "pack", rounds, mode == "quant", False, False, 1 if t <= 256 else 2 if t <= 1025 else 3, 512 < t <= 1025)
+    if variant in ("bf16", "fp16") and hkv == TP2_HKV and t <= TP2_TILES[-1][0]:
+        tile = next((tq, shared) for most, tq, shared in TP2_TILES if t <= most)
+        return (variant, mode == "pack", 1, mode == "quant", False, False, *tile)
     return (variant, mode == "pack", rounds, mode == "quant", False, False)
 
 

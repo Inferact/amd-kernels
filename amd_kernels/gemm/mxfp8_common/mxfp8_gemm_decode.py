@@ -314,6 +314,7 @@ def compile_mxfp8_gemm_decode(
     OWNER_READ: bool | None = None,
     OUT_CM: int | None = None,
     INTERLEAVE_PRIME: bool | None = None,
+    GROUPED: bool | None = None,
 ):
     """Kernel for one (N, K) weight, ``RT`` 16-row tiles per workgroup (M <= 16*RT per
     m-block), ``NI`` 16-column tiles per workgroup, ``KW`` K-waves. Grid =
@@ -341,6 +342,9 @@ def compile_mxfp8_gemm_decode(
     pair that fits ``vgpr_budget`` VGPRs; ``sched_barriers`` keeps the loads where the
     source issues them (off, the scheduler hoists them: a little faster while the
     registers last). The tuned rows carry the values the sweep found clean and fastest.
+
+    ``GROUPED`` forces the grouped XCD order of the m-blocks on or off (a shape folder's rows,
+    sweeps); None: the built-in rows below.
 
     ``INTERLEAVE_PRIME=False`` runs the preceding W-first burst prologue for A/B tests.
     Measured rows otherwise alternate one W step and its A fragments (A first for o_proj).
@@ -416,7 +420,7 @@ def compile_mxfp8_gemm_decode(
             or (N == 6144 and K == 2048 and NI == 6
                 and RT in (7, 8) and KW == 2 and w_cm == W_CACHE_MOD)
         )
-    )
+    ) if GROUPED is None else (bool(GROUPED) and KS == 1 and not A_BF16)
 
     @fx.struct
     class Shared:

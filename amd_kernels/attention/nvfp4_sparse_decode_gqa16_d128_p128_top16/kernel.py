@@ -253,6 +253,7 @@ def compile_nvfp4_sparse_decode(
     quant: bool = False,
     exact_fp16: bool = False,
     tail: bool = False,
+    row_spread: bool = False,
 ):
     """The launcher of one variant.
 
@@ -265,10 +266,13 @@ def compile_nvfp4_sparse_decode(
         exact_fp16: exact e2m1 x scale K / V with fp16 Q / P.
         tail: (needs ``xcds``) a 1-D grid: the whole CU rounds of (row, KV head) pairs at one split each, then the
             leftover pairs at ``splits`` each.
+        row_spread: (needs ``xcds``) row bx on XCD bx % xcds, grid.x padded to ``xcds`` only: a request's rows spread
+            over the XCDs, a row's splits share one.
     """
     assert 1 <= topk <= 64 and splits >= 1
     assert not tail or xcds > 0, "the tail grid places a pair's splits by XCD"
-    SPLITS, TOPK, XCDS, TAIL = splits, topk, xcds, tail
+    assert not row_spread or (xcds > 0 and not tail)
+    SPLITS, TOPK, XCDS, TAIL, ROW_SPREAD = splits, topk, xcds, tail, row_spread
     PART_SCOPE = 0 if XCDS else AGENT_SCOPE
     mfma = "f16" if exact_fp16 else "bf16"  # the MFMA operand dtype
     name = (
@@ -276,6 +280,7 @@ def compile_nvfp4_sparse_decode(
         + (f"_xcd{XCDS}" if XCDS else "")
         + ("_mxfp8" if quant else "")
         + ("_tail" if tail else "")
+        + ("_rowspread" if row_spread else "")
     )
 
     @fx.struct
@@ -430,7 +435,7 @@ def compile_nvfp4_sparse_decode(
             row = fx.Int32(fx.rocdl.readfirstlane(T.i32, pair // i32_hkv))
             kvh = fx.Int32(fx.rocdl.readfirstlane(T.i32, pair % i32_hkv))
         else:
-            if const_expr(XCDS > 0):
+            if const_expr(XCDS > 0 and not ROW_SPREAD):
                 # grid.x is padded to XCDS x ql: a permutation that puts each request's ql rows on one XCD (padding
                 # rows map past i32_rows)
                 xcd = bx % XCDS

@@ -1,13 +1,13 @@
 # MXFP8 GEMM: the dispatcher and the shared kernels (gfx950)
 
 ## What it does
-`out [M, N] = x [M, K] @ W^T` for the MXFP8 dense linears of MiniMax-M3.1-Flash at TP4. W: E4M3 codes [N, K] + E8M0
-per-32 scales [N, K / 32], preshuffled at load ((16, 16) codes, AITER `shuffle_scale_a16w4` scales). x: bf16 / fp16
-[M, K], K % 256 == 0, quantized per 1 x 32 block. Shapes (N x K): 2560 x 6144 QKV, 6144 x 2048 o_proj, 6144 x 8192
-`o_proj_full`, 6144 x 6144 dense gate_up, 6144 x 3072 dense down, 1536 x 6144 / 6144 x 768 shared-expert gate_up /
-down, 2304 x 6144 draft QKV, 1280 x 6144 draft context K / V. Callers: vLLM's MXFP8 linears, the norm + quant
-producers, the QKV chain, SP hand-offs. `reference.py`: exact dequant, fp32 sums, one rounding; cos >= 0.99999,
-L2 <= 1e-3, bitwise repeats.
+`out [M, N] = x [M, K] @ W^T` for the MXFP8 dense linears of MiniMax-M3.1-Flash. W: E4M3 codes [N, K] + E8M0 per-32
+scales [N, K / 32], preshuffled at load ((16, 16) codes, AITER `shuffle_scale_a16w4` scales). x: bf16 / fp16 [M, K],
+K % 256 == 0, quantized per 1 x 32 block. Shapes (N x K) of the TP4 / TP2 shards: QKV 2560 / 4992 x 6144, o_proj
+6144 x 2048 / 4096, `o_proj_full` 6144 x 8192, dense gate_up 6144 / 12288 x 6144, dense down 6144 x 3072 / 6144,
+shared-expert gate_up 1536 / 3072 x 6144 and down 6144 x 768 / 1536, draft QKV 2304 / 4608 x 6144, draft context K / V
+1280 / 2560 x 6144. Callers: vLLM's MXFP8 linears, the norm + quant producers, the QKV chain, SP hand-offs.
+`reference.py`: exact dequant, fp32 sums, one rounding; cos >= 0.99999, L2 <= 1e-3, bitwise repeats.
 
 ## Entry points
 - `gemm.preshuffle_mxfp8_weight`, `gemm.preshuffle_mxfp8_weight_`: the load-time weight preshuffle; the in-place form
@@ -27,20 +27,26 @@ L2 <= 1e-3, bitwise repeats.
 - `gemm.mxfp8_e4m3_quantize_aiter`, `gemm.mxfp8_e4m3_quantize_shuffled`: the activation quantizer, row-major or
   (16, 16) codes.
 
-Dispatch: `gemm._select_config` reads the tuned table `mxfp8_gemm_tuned.py`; a shape folder's `host.select`
-(`gemm._SHAPE_HOSTS`) answers first.
+Dispatch: `gemm._select_config` asks the shape's folder (`gemm/mxfp8_n<N>_k<K>/host.py`: `ROWS`, `select`); a folder's `host.select`
+(`gemm._SHAPE_HOSTS`) answers first; the `decode_splitk` rows run `mxfp8_gemm_decode_splitk.py`. `out=` (a caller's
+arena) is accepted for o_proj 6144 x 2048 / 4096.
 
 ## Performance
-Graph replay, real TP4 rank 0 weights in cold rotated copies (> 400 MB), µs per call, median.
+Graph replay, cold rotated weight copies (> 400 MB), bf16 entry (quantizer + GEMM), µs per call, median; baseline
+vLLM's Triton `tl.dot_scaled` linear (`rocm_native._mxfp8_dot_scaled_linear`, its `_M31_TILES`), the same bf16 input.
 
-| N x K | M | µs | Baseline µs, or our delta | Baseline |
-|---|---|---|---|---|
-| 1536 x 6144 | 1-256 | 4.28-13.13 | -19..-49% / -18..-53% | AITER `any` row / vLLM nightly `dot_scaled` |
-| 6144 x 768 | 1-256 | 2.79-7.56 | -20..-62% / -19..-47% | AITER `any` row / vLLM nightly `dot_scaled` |
-| shared expert, c16 decode mix | per MoE layer | 11.96 | 19.46 / 18.80 µs | AITER rows / vLLM nightly |
-| 2304 x 6144 | 112 / 896 | 8.61 / 27.48 | 10.06 / 35.26 µs | non-temporal W / AITER 128x128 |
-| 1280 x 6144 | 256 / 512 / 2048 | 11.75 / 13.75 / 41.09 | 15.53 / 51.29 / 68.37 µs | generic AITER fallback |
+| N x K | M 1 | M 8 | M 32 | M 128 | M 256 | M 416 | M 1024 | M 8192 | vs Triton |
+|---|---|---|---|---|---|---|---|---|---|
+| 3072 x 6144 | 5.18 | 6.53 | 8.98 | 12.22 | 16.03 | 21.15 | 36.69 | 140.2 | -30..-49% |
+| 6144 x 1536 | 3.51 | 3.79 | 5.82 | 8.09 | 9.90 | 12.39 | 19.19 | 76.7 | -15..-46% |
+| 4608 x 6144 | 6.57 | 8.02 | 10.93 | 14.24 | 19.18 | 26.13 | 40.08 | 194.2 | -38..-58% |
+| 12288 x 6144 | 12.96 | 14.65 | 17.62 | 26.20 | 32.77 | 49.40 | 75.99 | 456.9 | -28..-59% |
+| 6144 x 6144 | 7.55 | 8.65 | 12.03 | 15.52 | 21.32 | 28.74 | 47.34 | 232.9 | -17..-53% |
+| 2560 x 6144 | 4.56 | 6.34 | 9.72 | 13.83 | 16.59 | 20.05 | 27.33 | 126.1 | +1..-59% |
 
 ## Tests
 - `python3 -m pytest tests/gemm/mxfp8_common -q`
 - `python3 benchmarks/gemm/mxfp8_common/benchmark_gemm.py --variant <a test_gemm.CASES name>`
+- `python3 benchmarks/gemm/mxfp8_common/benchmark_table.py --shape N,K` (vLLM on the path for the baseline);
+  `sweep_rows.py --shape N,K --ms ... --family all` re-tunes a shape's rows; `benchmark_decode_splitk.py --shape N,K
+  --ms ... --cands ...` A/Bs the table's row against explicit decode / split-K decode rows.

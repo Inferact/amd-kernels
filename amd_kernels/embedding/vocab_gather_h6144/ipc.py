@@ -9,8 +9,6 @@ import torch.distributed as dist
 
 from amd_kernels.common.hip_runtime import load_hip_runtime
 
-WORLD = 4
-
 
 def _run_compiled(exe, *args):
     """First call compiles and runs (``flyc.compile``); later calls dispatch the
@@ -71,9 +69,9 @@ def _open_handle(raw: bytes) -> int:
 def exchange(obj, rank: int, group) -> list:
     """Every rank's ``obj`` (broadcasts on the CPU group: all_gather_object fails
     on gloo under inference mode)."""
-    out = [[None] for _ in range(WORLD)]
-    out[rank][0] = obj
     ranks = sorted(dist.get_process_group_ranks(group=group))
+    out = [[None] for _ in ranks]
+    out[rank][0] = obj
     for i, r in enumerate(ranks):
         dist.broadcast_object_list(out[i], src=r, group=group, device="cpu")
     return [o[0] for o in out]

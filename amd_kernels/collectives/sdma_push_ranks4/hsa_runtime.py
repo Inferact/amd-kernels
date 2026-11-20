@@ -18,6 +18,7 @@ from amd_kernels.common.hip_runtime import load_hip_runtime
 HSA_AGENT_INFO_DEVICE = 17
 HSA_DEVICE_TYPE_GPU = 1
 HSA_AMD_AGENT_INFO_BDFID = 0xA006
+HSA_AMD_AGENT_INFO_DOMAIN = 0xA00F
 HSA_AMD_SIGNAL_AMD_GPU_ONLY = 1  # the value lives in device memory, where a HIP stream can write it
 HSA_SIGNAL_CONDITION_LT = 2
 HSA_WAIT_STATE_ACTIVE = 1
@@ -79,8 +80,9 @@ def hip() -> ctypes.CDLL:
 
 @functools.cache
 def gpu_agents() -> dict[int, Agent]:
-    """Every GPU agent of the process by its PCI bus / device id (the function bits cleared)."""
-    lib, out = hsa(), {}
+    """Every GPU agent of the process by its PCI domain / bus / device (the function bits cleared): a node can have
+    several PCI domains with the same bus / device numbers."""
+    lib, out, keys = hsa(), {}, []
 
     def visit(agent, _):
         kind = ctypes.c_uint32()
@@ -88,19 +90,24 @@ def gpu_agents() -> dict[int, Agent]:
         if kind.value == HSA_DEVICE_TYPE_GPU:
             bdf = ctypes.c_uint32()
             lib.hsa_agent_get_info(agent, HSA_AMD_AGENT_INFO_BDFID, ctypes.byref(bdf))
-            out[bdf.value & ~0x7] = Agent(agent.handle)
+            domain = ctypes.c_uint32()
+            lib.hsa_agent_get_info(agent, HSA_AMD_AGENT_INFO_DOMAIN, ctypes.byref(domain))
+            keys.append((domain.value << 16) | (bdf.value & ~0x7))
+            out[keys[-1]] = Agent(agent.handle)
         return 0
 
     callback = lib._visit_type(visit)
     rc = lib.hsa_iterate_agents(callback, None)
     assert rc == 0, f"hsa_iterate_agents failed: {rc:#x}"
+    # checked here, not in visit: ctypes prints and drops an exception raised in a callback
+    assert len(out) == len(keys), f"two GPU agents at one PCI key: {sorted(map(hex, keys))}"
     return out
 
 
 def pci_key(device: torch.device) -> int:
     """The key of ``gpu_agents`` for a torch device."""
     p = torch.cuda.get_device_properties(device)
-    return (p.pci_bus_id << 8) | (p.pci_device_id << 3)
+    return (p.pci_domain_id << 16) | (p.pci_bus_id << 8) | (p.pci_device_id << 3)
 
 
 def signal(value: int = 1) -> Signal:

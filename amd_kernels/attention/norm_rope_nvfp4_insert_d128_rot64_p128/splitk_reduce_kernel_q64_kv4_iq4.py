@@ -35,6 +35,11 @@ from .kernel import (
 )
 
 
+# measured on the insert alone at q32: early slab loads -1..-2% at 192-768 rows, nt q / index-q stores -4..-11% at 8-768
+EARLY_NKV = (1, 2)  # KV heads whose V waves load the slabs early
+NT_Q_TILES = ((32, 2, 2, 64, 1), (32, 2, 2, 64, 2))  # (nq, nkv, niq, rotary_dim, pairs)
+
+
 def compile_reduce_insert(
     nq: int, nkv: int, niq: int, rotary_dim: int, tp: int, sk: int
 ):
@@ -52,10 +57,15 @@ def compile_reduce_insert(
     HALF = rotary_dim // 2
     SIDE = nkv * BLK * 72  # one side of a main page (bytes)
     TPW = 2 * tp  # tokens per wave
+    # >= 2 pairs: V waves issue every slab load a run may need before the slot loads (split-K consumer)
+    EARLY = tp >= 2 and nkv in EARLY_NKV
+    Q_STORE_CM = 2 if (nq, nkv, niq, rotary_dim, tp) in NT_Q_TILES else 0
     name = (
         f"splitk_reduce_norm_rope_nvfp4_insert_d128_p128_q{nq}_kv{nkv}_iq{niq}"
         f"_rot{rotary_dim}_pairs{tp}_s{sk}"
     )
+    if Q_STORE_CM:
+        name += "_qnt"
 
     # the first loads' arguments lead: the first 56 bytes arrive preloaded in SGPRs
     @flyc.kernel(name=name, known_block_size=[64 * NW, 1, 1])
@@ -236,6 +246,7 @@ def compile_reduce_insert(
                         q_r,
                         toks[t] * (nq * D // 2) + s * (D // 2) + hl * 2,
                         mask=lives[t],
+                        cache_modifier=Q_STORE_CM,
                     )
             if s > nq + nkv:
                 iq_r = buffer_ops.create_buffer_resource_from_addr(
@@ -256,6 +267,7 @@ def compile_reduce_insert(
                         toks[t] * i32_iq_st + iq_col + dim0,
                         mask=lives[t],
                         offset_is_bytes=True,
+                        cache_modifier=Q_STORE_CM,
                     )
             if is_kq:
                 gs = is_k.select(
@@ -292,9 +304,7 @@ def compile_reduce_insert(
             tok = (wid // S) * TPW + ((s - NR) % tp) * 2 + lane // 32
             live = tok < i32_n
             vcol = (nq + nkv + vh) * D  # V head column (elements)
-            # one V head, >= 2 pairs: every slab load a run may need before the slot loads (split-K consumer)
-            early = tp >= 2 and nkv == 1
-            vfr = [load4(tok + r, vcol, tok + r < i32_n) for r in range_constexpr(8)] if early else []
+            vfr = [load4(tok + r, vcol, tok + r < i32_n) for r in range_constexpr(8)] if EARLY else []
             vs = fx.Float32(_gptr(arg_vs, T.f32, 4)[0])
             near_t = tok - 7 + hl
             has_near = (hl < 16) & (near_t >= 0) & (near_t < i32_n)
@@ -323,7 +333,7 @@ def compile_reduce_insert(
             # the rows a run starting here can cover, before its slot is known
             rows = (
                 [sum4(vfr[r]) for r in range_constexpr(8)]
-                if early
+                if EARLY
                 else [row4(tok + r, vcol, tok + r < i32_n) for r in range_constexpr(8)]
             )
             base = slot - slot % 8

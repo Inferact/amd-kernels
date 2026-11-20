@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the amd-kernels project
-"""``kernel.py`` at 8 rows per request, 16 query heads, 1 KV head, 4 splits, rows spread over the 8 XCDs.
+"""``kernel.py`` at 8 rows per request, 16 query heads per KV head, 1 or 2 KV heads (``hkv``), 4 splits, rows spread
+over the 8 XCDs.
 
 Row bx runs on XCD bx % 8 (grid.x padded to 8, not 8 x ql), so a request's rows spread over the XCDs and a row's splits
 still share one; the first block's loads issue before the table barrier. The host takes it at <= 32 rows. The numerics
@@ -21,13 +22,16 @@ from .kernel import (
 )
 
 
-def compile_nvfp4_bf16mfma_gqa16_d128_p128_top16_q8_rowxcd(splits: int, quant: bool):
+def compile_nvfp4_bf16mfma_gqa16_d128_p128_top16_q8_rowxcd(splits: int, quant: bool, hkv: int = 1):
     """The launcher (splits 4)."""
+    assert hkv in (1, 2), hkv
+    HKV = hkv
     assert splits == 4
     SPLITS, TOPK, XCDS = splits, 16, 8
     PART_SCOPE = 0
     name = (
         f"nvfp4_bf16mfma_sparse_gqa16_d128_p128_top{TOPK}_q8_rowxcd_s{SPLITS}_xcd{XCDS}"
+        + ("_kv2" if HKV == 2 else "")
         + ("_mxfp8" if quant else "")
     )
 
@@ -136,9 +140,9 @@ def compile_nvfp4_bf16mfma_gqa16_d128_p128_top16_q8_rowxcd(splits: int, quant: b
         i32_tpx: fx.Int32,
     ):
         smem = fx.SharedAllocator().allocate(Shared).peek()
-        # the served shape: 16 query heads, 1 KV head (8 rows per request below)
-        i32_H = fx.Int32(16)
-        i32_hkv = fx.Int32(1)
+        # the served shape: 16 query heads per KV head, HKV KV heads (8 rows per request below)
+        i32_H = fx.Int32(16 * HKV)
+        i32_hkv = fx.Int32(HKV)
         tx = fx.thread_idx.x
         bx, kvh = fx.block_idx.x, fx.block_idx.y
         lane = tx % 64

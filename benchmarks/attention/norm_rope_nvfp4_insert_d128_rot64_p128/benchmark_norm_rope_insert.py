@@ -7,15 +7,17 @@ split-K slab, positions, the two slot mappings, q_out / index_q_out, and its own
 of one large KV / index cache). The inputs rotate over more than 400 MB in all (above
 the 256 MB MALL), so every call reads and writes HBM-cold data; this is conservative
 for qkv, which serving gets warm from the QKV GEMM. Decode batches (up to 1024 tokens)
-are requests of 4 tokens (the MTP / DSpark rows) in their own pages; larger batches
+are requests of 4 tokens (``--decode-run 8``: DSpark 7) in their own pages; larger batches
 are 8 requests continuing 40K-token contexts. The first and last input are checked
 against ``norm_rope_nvfp4_insert_d128_rot64_p128/reference.py`` before timing. Median of 5
 rounds of 10 replays of every graph, us per call.
 
   python3 benchmarks/attention/norm_rope_nvfp4_insert_d128_rot64_p128/benchmark_norm_rope_insert.py   # the entry's kernel per size
   python3 benchmarks/attention/norm_rope_nvfp4_insert_d128_rot64_p128/benchmark_norm_rope_insert.py --reduce   # the split-K reduce kernel
+  ... --heads 32 2 2   # TP2 heads (default q16 kv1 iq1, TP4)
+  ... --baseline       # vLLM's own FlyDSL insert (ops/norm_rope_nvfp4_insert), the stock path at TP2
 
-Heads q16 kv1 iq1, rotary 64 (TP4).
+Rotary 64.
 """
 
 import argparse
@@ -33,19 +35,22 @@ from amd_kernels.attention.norm_rope_nvfp4_insert_d128_rot64_p128 import host
 D, BLK, WIDTH = ref.D, ref.BLK, ref.WIDTH
 EPS, ROT = 1e-6, 64
 HEADS = (16, 1, 1)
+BASELINE = None  # vLLM's minimax_m3_norm_rope_nvfp4_insert under --baseline
+DECODE_RUN = 4  # tokens per decode request
 LLC_TARGET_BYTES = 400 * 1024**2  # above the 256 MB MALL
 CALLS = 100  # calls per graph, each on its own inputs
 VERBOSE = False
 MAX_POS = 65536
 TOKENS = [1, 4, 64, 172, 256, 512, 1024, 4096, 16384]
-REDUCE = [(32, 3), (128, 3), (200, 2), (288, 2)]  # (tokens, split) of the QKV GEMM's deferred rows
+# (tokens, split) of the QKV GEMM's deferred rows (N 2560 / N 4992)
+REDUCE = {(16, 1, 1): [(32, 3), (128, 3), (200, 2), (288, 2)], (32, 2, 2): [(16, 2), (32, 2), (48, 3), (64, 2)]}
 
 
 def slot_plan(n, gen):
-    """(positions, slots, pages): decode batches as requests of up to 4 tokens, one
+    """(positions, slots, pages): decode batches as requests of up to DECODE_RUN tokens, one
     page each at a random offset; larger ones as 8 requests continuing 40K contexts."""
     if n <= 1024:
-        run = min(4, n)
+        run = min(DECODE_RUN, n)
         reqs = -(-n // run)
         pos = []
         for r in range(reqs):
@@ -115,6 +120,8 @@ class Inputs:
         if self.split_k:
             fn = op or splitk_reduce_norm_rope_nvfp4_insert
             fn(self.slab[i], self.split_k, *args, **kw)
+        elif op is None and BASELINE is not None:
+            BASELINE(self.qkv[i], *args, **kw)
         else:
             fn = op or norm_rope_nvfp4_insert
             fn(self.qkv[i], *args, **kw, prefill=kernel == "prefill")
@@ -199,36 +206,39 @@ def bench(n, kernels, split_k=0, rounds=1):
     for _ in range(rounds):
         for k in kernels:
             times[k].append(time_graphs(graphs[k]))
-    for kernel, ts in times.items():
-        name = "splitk" if split_k else kernel
+    for ts in times.values():
         us = " / ".join(f"{t:.2f}" for t in ts)
         what = f"split {split_k}, " if split_k else ""
-        if split_k:
-            tp = host._reduce_token_pairs(n, split_k)
-        elif n >= host.PREFILL_TOKENS:
-            name, tp = "prefill", host._prefill_token_pairs(n)
-        else:
-            tp = host._main_token_pairs(n)
-        print(f"q16_kv1_iq1 n={n} {name}: {what}pairs {tp}, {inputs.copies} inputs; "
+        heads = (inputs.nq, inputs.nkv, inputs.niq)
+        name = "baseline" if BASELINE is not None else host._launcher(n, heads, split_k=split_k).kernel_name
+        print(f"q{heads[0]}_kv{heads[1]}_iq{heads[2]} n={n} {what}{name}, {inputs.copies} inputs; "
               f"{us} us ({inputs.bytes / statistics.median(ts) / 1e3:.0f} GB/s)", flush=True)  # fmt: skip
     del graphs, inputs
     torch.cuda.empty_cache()
 
 
 def main() -> None:
+    global LLC_TARGET_BYTES, VERBOSE, HEADS, BASELINE, DECODE_RUN
     parser = argparse.ArgumentParser()
     parser.add_argument("--tokens", type=int, nargs="*", default=TOKENS)
     parser.add_argument("--reduce", action="store_true", help="the split-K reduce kernel")
+    parser.add_argument("--heads", type=int, nargs=3, default=list(HEADS), help="q, KV, index heads per rank")
+    parser.add_argument("--baseline", action="store_true", help="vLLM's FlyDSL insert (bf16 qkv only)")
     parser.add_argument("--llc-mb", type=int, default=400, help="footprint the inputs rotate over")
+    parser.add_argument("--decode-run", type=int, default=DECODE_RUN, help="tokens per decode request (<= 1024 rows)")
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args()
-    global LLC_TARGET_BYTES, VERBOSE
-    LLC_TARGET_BYTES, VERBOSE = args.llc_mb * 1024**2, args.verbose
+    LLC_TARGET_BYTES, VERBOSE, HEADS = args.llc_mb * 1024**2, args.verbose, tuple(args.heads)
+    DECODE_RUN = args.decode_run
+    if args.baseline:
+        from vllm.models.minimax_m3.amd.ops.norm_rope_nvfp4_insert.host import minimax_m3_norm_rope_nvfp4_insert
+
+        BASELINE = minimax_m3_norm_rope_nvfp4_insert
     if not torch.cuda.is_available() or "gfx950" not in torch.cuda.get_device_properties(0).gcnArchName:
         raise RuntimeError("requires gfx950")
     with torch.inference_mode():
         if args.reduce:
-            for n, split_k in REDUCE:
+            for n, split_k in REDUCE[HEADS]:
                 bench(n, ["main"], split_k)
         else:
             for n in args.tokens:

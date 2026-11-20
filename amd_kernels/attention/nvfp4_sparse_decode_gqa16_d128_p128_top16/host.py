@@ -48,85 +48,90 @@ def _get_kernel(
     row_xcd: bool = False,
     prefetch: bool = False,
     fixed: bool = False,
+    hkv: int = 1,
+    row_spread: bool = False,
 ):
+    """``hkv``: the KV heads the q8 variants (row_xcd, prefetch, fixed, fp8 q8) fold; kernel.py takes them at run
+    time. ``row_spread``: kernel.py's row-spread grid."""
     if fixed and not fp8:
         from .bf16mfma_gqa16_d128_p128_top16_q8_fixed import compile_nvfp4_bf16mfma_gqa16_d128_p128_top16_q8_fixed
-        return compile_nvfp4_bf16mfma_gqa16_d128_p128_top16_q8_fixed(splits, quant)
+        return compile_nvfp4_bf16mfma_gqa16_d128_p128_top16_q8_fixed(splits, quant, hkv)
     if prefetch and not fp8:
         from .bf16mfma_gqa16_d128_p128_top16_prefetch import (
             compile_nvfp4_bf16mfma_gqa16_d128_p128_top16_prefetch,
         )
 
-        return compile_nvfp4_bf16mfma_gqa16_d128_p128_top16_prefetch(splits, quant)
+        return compile_nvfp4_bf16mfma_gqa16_d128_p128_top16_prefetch(splits, quant, hkv)
     if row_xcd and fp8:
         from .fp8mfma_gqa16_d128_p128_top16_q8_rowxcd import (
             compile_nvfp4_fp8mfma_gqa16_d128_p128_top16_q8_rowxcd,
         )
 
         return compile_nvfp4_fp8mfma_gqa16_d128_p128_top16_q8_rowxcd(
-            splits, topk, xcds, quant, tail
+            splits, topk, xcds, quant, tail, hkv
         )
     if row_xcd and exact_fp16:
         from .f16mfma_gqa16_d128_p128_top16_q8_rowxcd import compile_nvfp4_f16mfma_gqa16_d128_p128_top16_q8_rowxcd
 
-        return compile_nvfp4_f16mfma_gqa16_d128_p128_top16_q8_rowxcd(splits, quant)
+        return compile_nvfp4_f16mfma_gqa16_d128_p128_top16_q8_rowxcd(splits, quant, hkv)
     if row_xcd:
         from .bf16mfma_gqa16_d128_p128_top16_q8_rowxcd import (
             compile_nvfp4_bf16mfma_gqa16_d128_p128_top16_q8_rowxcd,
         )
 
-        return compile_nvfp4_bf16mfma_gqa16_d128_p128_top16_q8_rowxcd(splits, quant)
+        return compile_nvfp4_bf16mfma_gqa16_d128_p128_top16_q8_rowxcd(splits, quant, hkv)
     if fp8:
         from .fp8 import kernel as _kernel_fp8
 
         return _kernel_fp8.compile_nvfp4_fp8mfma_sparse_decode(
-            splits, topk, xcds, quant, tail, prefetch, fixed
+            splits, topk, xcds, quant, tail, prefetch, fixed, hkv if fixed else 1
         )
     return _kernel.compile_nvfp4_sparse_decode(
-        splits, topk, xcds, quant, exact_fp16, tail
+        splits, topk, xcds, quant, exact_fp16, tail, row_spread
     )
 
 
 @functools.cache
-def _get_kernel_select(splits: int, quant: bool, exact_fp16: bool):
+def _get_kernel_select(splits: int, quant: bool, exact_fp16: bool, hkv: int = 1):
     if exact_fp16:
         from .f16mfma_gqa16_d128_p128_top16_q8_rowxcd_select import (
             compile_nvfp4_f16mfma_gqa16_d128_p128_top16_q8_rowxcd_select,
         )
 
-        return compile_nvfp4_f16mfma_gqa16_d128_p128_top16_q8_rowxcd_select(splits, quant)
+        return compile_nvfp4_f16mfma_gqa16_d128_p128_top16_q8_rowxcd_select(splits, quant, hkv)
     from .bf16mfma_gqa16_d128_p128_top16_q8_rowxcd_select import (
         compile_nvfp4_bf16mfma_gqa16_d128_p128_top16_q8_rowxcd_select,
     )
 
-    return compile_nvfp4_bf16mfma_gqa16_d128_p128_top16_q8_rowxcd_select(splits, quant)
+    return compile_nvfp4_bf16mfma_gqa16_d128_p128_top16_q8_rowxcd_select(splits, quant, hkv)
 
 
 @functools.cache
 def _get_kernel_select_generic(
-    splits: int, topk: int, xcds: int, quant: bool, exact_fp16: bool, tail: bool
+    splits: int, topk: int, xcds: int, quant: bool, exact_fp16: bool, tail: bool, hkv: int = 1,
+    row_spread: bool = False,
 ):
     from .kernel_select import compile_nvfp4_sparse_decode_select
 
-    return compile_nvfp4_sparse_decode_select(splits, topk, xcds, quant, exact_fp16, tail)
+    return compile_nvfp4_sparse_decode_select(splits, topk, xcds, quant, exact_fp16, tail, hkv, row_spread)
 
 
 @functools.cache
-def _get_kernel_select_prefetch(splits: int, quant: bool):
+def _get_kernel_select_prefetch(splits: int, quant: bool, hkv: int = 1):
     from .bf16mfma_gqa16_d128_p128_top16_prefetch_select import (
         compile_nvfp4_bf16mfma_gqa16_d128_p128_top16_prefetch_select,
     )
 
-    return compile_nvfp4_bf16mfma_gqa16_d128_p128_top16_prefetch_select(splits, quant)
+    return compile_nvfp4_bf16mfma_gqa16_d128_p128_top16_prefetch_select(splits, quant, hkv)
 
 
 @functools.cache
-def _get_kernel_select_fixed(splits: int, quant: bool):
+def _get_kernel_select_fixed(splits: int, quant: bool, hkv: int = 1):
     from .bf16mfma_gqa16_d128_p128_top16_q8_fixed_select import (
         compile_nvfp4_bf16mfma_gqa16_d128_p128_top16_q8_fixed_select,
     )
 
-    return compile_nvfp4_bf16mfma_gqa16_d128_p128_top16_q8_fixed_select(splits, quant)
+    return compile_nvfp4_bf16mfma_gqa16_d128_p128_top16_q8_fixed_select(splits, quant, hkv)
 
 
 def _select_ids(index_score, seq_lens, topk_idx, rows, query_len, max_seq_len):
@@ -158,6 +163,8 @@ def _unit_scale(device: torch.device) -> torch.Tensor:
     return torch.ones(1, dtype=torch.float32, device=device)
 
 
+# tail grid at 2 KV heads up to this leftover of a CU round: -1..-18% at 1/16-1/2, +0.4..+18% at 5/8-7/8 (--tail-splits)
+KV2_TAIL_MAX_LEFT = 0.5
 # (ql, requests) where the padded one-split grid beats the tail grid beyond A/A noise (up to 10%)
 _PADDED_S1 = {6: (8, 29, 40), 8: (8, 14, 22, 30, 38, 46)}
 # (ql, requests) where the tail grid's split count adds a CU round: ql 6 x 50 requests 4 splits 55.17 us, 1 split 51.36
@@ -181,6 +188,19 @@ def _tp4_q8_splits(rows: int) -> int:
     return 1
 
 
+def _tp2_splits(ql: int, rows: int) -> int | None:
+    """Splits of the padded grid at 2 KV heads, top-16, 8 XCDs (partial CU rounds past the first take the tail grid,
+    ``_use_tail``); None: ``decode_splits``. Measured where the cost model misses (``benchmark_sparse_decode.py
+    --splits``, 1-128 requests: ql 4 x 24 requests 1 split 16.0 vs 4 splits 17.2 us)."""
+    if ql == 8:
+        return 4 if rows <= 32 else 2 if rows <= 64 else 1
+    if ql == 4:
+        return 4 if rows <= 32 else 2 if rows <= 64 else 1 if rows <= 128 else None
+    if ql == 1:
+        return 8 if rows <= 4 else 4 if rows <= 32 else 2 if rows <= 64 else 1 if rows <= 128 else None
+    return None
+
+
 def _tuned_splits(
     exact_fp16: bool,
     quant: bool,
@@ -198,6 +218,8 @@ def _tuned_splits(
         and xcds == 8
     ):
         return _tp4_q8_splits(reqs * decode_query_len)
+    if num_kv_heads == 2 and topk == 16 and xcds == 8:
+        return _tp2_splits(decode_query_len, reqs * decode_query_len)
     if not (exact_fp16 and quant and num_kv_heads == 4 and topk == 16 and xcds == 8):
         return None
     # (q = 6 and 8 take the tail grid, ``_use_tail``, except these requests.)
@@ -214,9 +236,17 @@ def _use_tail(
     topk: int,
     xcd_count: int,
     reqs: int,
+    cus: int,
 ) -> bool:
     """Whether an automatic launch takes the tail grid (``tail_schedule``): 4 KV heads, exact fp16, MXFP8 output,
-    ql 6 or 8, top-16, 8 XCDs, except the ``_PADDED_S1`` batches."""
+    ql 6 or 8, top-16, 8 XCDs, except the ``_PADDED_S1`` batches; 2 KV heads, exact fp16, top-16, 8 XCDs, past one CU
+    round of (row, KV head) pairs with a leftover of at most ``KV2_TAIL_MAX_LEFT`` of a round."""
+    if num_kv_heads == 2:
+        pairs = reqs * decode_query_len * num_kv_heads
+        return (
+            exact_fp16 and topk == 16 and xcd_count == 8 and pairs > cus
+            and 0 < pairs % cus <= KV2_TAIL_MAX_LEFT * cus
+        )
     return (
         reqs not in _PADDED_S1.get(decode_query_len, ())
         and exact_fp16
@@ -269,6 +299,18 @@ def _cu_count(device: torch.device) -> int:
     return torch.cuda.get_device_properties(device).multi_processor_count
 
 
+# the KV head counts the q8 variants (rowxcd, prefetch, fixed, fp8 q8; ql 8, top-16, 8 XCDs) fold
+Q8_KV_HEADS = (1, 2)
+# rows up to which the rowxcd kernels serve, per KV heads
+ROW_XCD_MAX_ROWS = {1: 32, 2: 32}
+# fp16 at more KV heads than this drops the padded XCD grid for <= 4 multi-row requests (below)
+PLAIN_GRID_MIN_KV = 2
+# rows up to which kernel.py's row-spread grid serves ql < 8: 2 KV heads ql 4 x 1-6 requests -0.1..-0.5 us, 8: +0.2
+ROW_SPREAD_MAX_ROWS = {2: 24}
+
+# in-kernel top-16 through these rows (2 KV heads: -1.0..-2.6 us vs the selector launch, benchmark_index_decode.py)
+SELECT_MAX_ROWS = {1: 256, 2: 1024}
+
 # ``quant_out`` from this many rows: attention + o_proj -1.0..-11.4% at 8-512 rows, +1.5% at 4 (bench_attn_oproj_mxfp8)
 MXFP8_OUT_MIN_ROWS = 8
 
@@ -305,9 +347,9 @@ def nvfp4_sparse_decode(
         splits: None: the host's schedule (the tail grid for the ``_use_tail`` shapes); a count keeps the padded grid.
         tail_splits: the tail grid with that many tail splits (sweeps).
         index_score: the indexer's scores (``nvfp4_index_score_rows``; ``index_max_seq_len`` its host max): the call
-            writes ``topk_idx`` (``nvfp4_index_score_top16``'s ids, bit for bit) before reading it. At 1 KV head,
-            top-16, bf16 and <= 256 rows the attention workgroups select themselves (the ``*_select`` kernels);
-            elsewhere the selector launches first.
+            writes ``topk_idx`` (``nvfp4_index_score_top16``'s ids, bit for bit) before reading it. At 1 or 2 KV
+            heads (index head h feeds KV head h), top-16, bf16 / fp16 and <= ``SELECT_MAX_ROWS`` rows the attention
+            workgroups select themselves (the ``*_select`` kernels); elsewhere the selector launches first.
     """
     rows, num_heads, head_dim = q.shape
     if rows == 0:
@@ -391,26 +433,31 @@ def nvfp4_sparse_decode(
             topk,
             xcds,
             seq_lens.numel(),
+            _cu_count(q.device),
         )
     )
-    # <= 4 requests of 8 rows: rows spread over the XCDs, a row's 4 splits on one of them (grid.x a multiple of 8,
+    # few requests of 8 rows: rows spread over the XCDs, a row's 4 splits on one of them (grid.x a multiple of 8,
     # so the partials stay XCD-local)
     row_xcd = (
-        not tail and num_kv_heads == 1
-        and decode_query_len == 8 and topk == 16 and xcds == 8 and rows <= 32
+        not tail and num_kv_heads in Q8_KV_HEADS and num_kv_heads in ROW_XCD_MAX_ROWS
+        and decode_query_len == 8 and topk == 16 and xcds == 8 and rows <= ROW_XCD_MAX_ROWS[num_kv_heads]
         and (splits is None or splits == 4)
     )
     heavy = tpx = 0
-    # no padded XCD grid for <= 4 multi-row requests in fp16 at 4 KV heads (measured at ql 4 and 8; at 1 KV head
-    # it wins: ql 4 x 1 request 10.34 -> 8.04 us)
+    # fp16, <= 4 multi-row requests: the padded XCD grid loses at 4 KV heads, wins at 1 / 2 (ql 4 x 1: -2.3 / -1.6 us)
     if (
         not tail
         and exact_fp16
-        and num_kv_heads > 1
+        and num_kv_heads > PLAIN_GRID_MIN_KV
         and decode_query_len > 1
         and rows <= 4 * decode_query_len
     ):
         xcds = 0
+    # (not at 8 rows per request: the q8 variants fold the padded grid's row permutation)
+    row_spread = (
+        not tail and not row_xcd and not fp8 and xcds > 0 and 1 < decode_query_len < 8
+        and rows <= ROW_SPREAD_MAX_ROWS.get(num_kv_heads, 0)
+    )
     if tail:
         assert xcds > 0 and splits is None, "the tail grid needs the XCD grid"
         # (Automatic tail grid => the serving gate of ``_use_tail`` holds.)
@@ -422,7 +469,7 @@ def nvfp4_sparse_decode(
             rows * num_kv_heads, topk, _cu_count(q.device), xcds, tail_splits
         )
     elif xcds:
-        group = xcds if row_xcd else xcds * decode_query_len
+        group = xcds if row_xcd or row_spread else xcds * decode_query_len
         grid_x = -(-rows // group) * group
     else:
         grid_x = rows
@@ -430,6 +477,8 @@ def nvfp4_sparse_decode(
         wg_rows = grid_x * num_kv_heads
         if wg_rows > MAX_SPLIT_ROWS:
             splits = 1
+        elif row_xcd:
+            splits = 4
         else:
             tuned = _tuned_splits(
                 exact_fp16,
@@ -445,32 +494,27 @@ def nvfp4_sparse_decode(
             else:
                 splits = decode_splits(rows * num_kv_heads, topk, _cu_count(q.device))
     assert tail or splits == 1 or grid_x * num_kv_heads <= MAX_SPLIT_ROWS
+    # the q8 variants' grid bounds count (row, KV head) pairs
+    q8 = num_kv_heads in Q8_KV_HEADS and decode_query_len == 8 and topk == 16 and xcds == 8
+    pairs_x = grid_x * num_kv_heads
     # (fp16 keeps kernel.py here: its folded prefetch variant measured 64 rows 9.87 vs 9.76 us, 256 rows -0.4%)
     prefetch = (
-        not tail and not row_xcd and not exact_fp16 and not fp8
-        and num_kv_heads == 1 and decode_query_len == 8 and topk == 16 and xcds == 8
-        and splits in (1, 2, 4) and grid_x * splits <= _cu_count(q.device)
+        not tail and not row_xcd and not exact_fp16 and not fp8 and q8
+        and splits in (1, 2, 4) and pairs_x * splits <= _cu_count(q.device)
     )
     # fp8 per row, the same first-block overlap and grid bound: -3.3..-3.9% at 40-128 rows, -0.8% at 256
     fp8_prefetch = (
-        fp8 and not tail and not row_xcd
-        and num_kv_heads == 1 and decode_query_len == 8 and topk == 16 and xcds == 8
-        and splits in (1, 2, 4) and grid_x * splits <= _cu_count(q.device)
+        fp8 and not tail and not row_xcd and q8
+        and splits in (1, 2, 4) and pairs_x * splits <= _cu_count(q.device)
     )
-    fp8_q8 = (
-        fp8 and not row_xcd
-        and num_kv_heads == 1 and decode_query_len == 8 and topk == 16 and xcds == 8
-        and splits in (1, 2, 4)
-    )
+    fp8_q8 = fp8 and not row_xcd and q8 and splits in (1, 2, 4)
     fixed = (
-        not tail and not row_xcd and not prefetch and not exact_fp16 and not fp8
-        and num_kv_heads == 1 and decode_query_len == 8 and topk == 16 and xcds == 8
-        and splits in (2, 4) and grid_x <= 192
+        not tail and not row_xcd and not prefetch and not exact_fp16 and not fp8 and q8
+        and splits in (2, 4) and pairs_x <= 192
     )
-    # (measured through 256 rows; larger batches keep the selector launch)
     generic = not row_xcd and not prefetch and not fixed and not fp8
     select = (
-        index_score is not None and num_kv_heads == 1 and topk == 16 and rows <= 256
+        index_score is not None and topk == 16 and rows <= SELECT_MAX_ROWS.get(num_kv_heads, 0)
         and ((row_xcd and not fp8) or prefetch or fixed or generic)
     )
     if index_score is not None and not select:
@@ -482,28 +526,37 @@ def nvfp4_sparse_decode(
     c = float(np.float32(sm_scale) * np.float32(_kernel.LOG2E))
     extra = ()
     if select:
-        extra = (index_score.data_ptr(), index_score.stride(1), width)
+        s_row = index_score.stride(1)
+        if num_kv_heads == 2:
+            assert 0 <= s_row < 2**32 and 0 <= index_score.stride(0) < 2**31
+            s_row |= index_score.stride(0) << 32
+        extra = (index_score.data_ptr(), s_row, width)
+    # the q8 compile keys carry hkv only at 2 KV heads
+    hk = (2,) if q8 and num_kv_heads == 2 else ()
+    if select:
+        exe = (
+            _get_kernel_select(splits, quant, exact_fp16, *hk) if row_xcd
+            else _get_kernel_select_prefetch(splits, quant, *hk) if prefetch
+            else _get_kernel_select_fixed(splits, quant, *hk) if fixed
+            else _get_kernel_select_generic(splits, topk, xcds, quant, exact_fp16, tail,
+                                            hkv=2 if num_kv_heads == 2 else 1, row_spread=row_spread)
+        )
+    elif row_xcd:
+        exe = _get_kernel(splits, topk, xcds, quant, exact_fp16, tail, fp8, True, *((False, False) + hk if hk else ()))
+    elif prefetch:
+        exe = _get_kernel(splits, topk, xcds, quant, exact_fp16, tail, False, False, True,
+                          *((False,) + hk if hk else ()))
+    elif fixed:
+        exe = _get_kernel(splits, topk, xcds, quant, exact_fp16, tail, False, False, False, True, *hk)
+    elif fp8:
+        exe = _get_kernel(splits, topk, xcds, quant, exact_fp16, tail, fp8=True, prefetch=fp8_prefetch, fixed=fp8_q8,
+                          **({"hkv": 2} if hk else {}))
+    elif row_spread:
+        exe = _get_kernel(splits, topk, xcds, quant, exact_fp16, tail, False, False, False, False, 1, True)
+    else:
+        exe = _get_kernel(splits, topk, xcds, quant, exact_fp16, tail)
     _run_compiled(
-        (
-            _get_kernel_select(splits, quant, exact_fp16)
-            if select and row_xcd
-            else _get_kernel_select_prefetch(splits, quant)
-            if select and prefetch
-            else _get_kernel_select_fixed(splits, quant)
-            if select and fixed
-            else _get_kernel_select_generic(splits, topk, xcds, quant, exact_fp16, tail)
-            if select
-            else _get_kernel(splits, topk, xcds, quant, exact_fp16, tail, fp8, True)
-            if row_xcd
-            else _get_kernel(splits, topk, xcds, quant, exact_fp16, tail, False, False, True)
-            if prefetch
-            else _get_kernel(splits, topk, xcds, quant, exact_fp16, tail, False, False, False, True)
-            if fixed
-            else _get_kernel(splits, topk, xcds, quant, exact_fp16, tail, fp8=True,
-                             prefetch=fp8_prefetch, fixed=fp8_q8)
-            if fp8
-            else _get_kernel(splits, topk, xcds, quant, exact_fp16, tail)
-        ),
+        exe,
         q.data_ptr(),
         kv_cache.data_ptr(),
         topk_idx.data_ptr(),
@@ -538,7 +591,7 @@ def nvfp4_sparse_decode(
 # ---- warm-up (root README rule 4)
 
 # the request counts the first-call warm-up walks (``amd_kernels.warm_up``): the variant follows from the row and
-# request counts alone, so every count up to the TP4 batch limit; ``warm_up_decode`` walks a caller's own limit
+# request counts alone, so every count up to the largest served batch; ``warm_up_decode`` walks a caller's own limit
 WARM_MAX_REQS = 256
 
 

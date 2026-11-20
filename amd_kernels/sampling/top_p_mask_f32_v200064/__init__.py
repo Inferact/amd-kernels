@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the amd-kernels project
-"""Top-p mask of fp32 logits rows, vocab 200064: vLLM's split top-p pipeline (<= 64 rows) in one launch."""
+"""Top-p mask of fp32 logits rows, vocab 200064, bit for bit as vLLM: its split top-p pipeline (<= 64 rows) in one
+launch, and its one-program-per-row top-p kernel above."""
 
 
 def available() -> bool:
@@ -16,8 +17,8 @@ def available() -> bool:
     return True
 
 
-from .host import top_p_blocker, top_p_mask, warmup_top_p_mask
+from .host import rows_grid, top_p_blocker, top_p_mask, warmup_top_p_mask
 from .reference import SPLIT_MAX_BATCH, V, splits_for, top_p_mask_reference
 
-__all__ = ["SPLIT_MAX_BATCH", "V", "available", "splits_for", "top_p_blocker", "top_p_mask", "top_p_mask_reference",
-           "warmup_top_p_mask"]
+__all__ = ["SPLIT_MAX_BATCH", "V", "available", "rows_grid", "splits_for", "top_p_blocker", "top_p_mask",
+           "top_p_mask_reference", "warmup_top_p_mask"]

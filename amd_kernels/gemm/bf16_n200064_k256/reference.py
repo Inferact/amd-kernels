@@ -3,7 +3,7 @@
 """bf16 GEMM with packed activation rows, original bf16 weight, fp32 accumulate.
 
 Activation layout: [m16, k32, k8, row16, feature8], flattened and viewed as
-[padded_rows,256]; rows are padded to 16/32/64. Weight remains [200064,256],
+[padded_rows,256]; rows are padded to 16/32/64/128. Weight remains [200064,256],
 row major, shared with every existing reader. Output is row-major bf16.
 Reference uses fp64 accumulation, rounded once to bf16. Gate: row cosine
 >=0.99999 and relative L2 <=1e-3, deterministic. Accumulation order can move
@@ -14,7 +14,7 @@ N,K=200064,256
 
 
 def pack_rows_reference(x,indices):
-    n=indices.numel();pad=16 if n<=16 else (32 if n<=32 else 64)
+    n=indices.numel();pad=16 if n<=16 else (32 if n<=32 else (64 if n<=64 else 128))
     selected=torch.zeros(pad,K,dtype=torch.bfloat16,device=x.device)
     selected[:n]=x.index_select(0,indices)
     return selected.view(-1,16,8,4,8).permute(0,2,3,1,4).contiguous().view(pad,K)

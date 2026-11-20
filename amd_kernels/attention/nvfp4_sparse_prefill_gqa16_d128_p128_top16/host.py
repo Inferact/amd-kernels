@@ -131,6 +131,23 @@ def _on_gfx950() -> bool:
     ).gcnArchName.startswith("gfx950")
 
 
+# Hkv 2 (TP2): (most tokens, queries per workgroup, shared Q), the fastest tile at every count (sweep_tiles.py --hkv 2)
+HKV2_TILES = ((128, 1, False), (256, 2, True), (384, 3, False), (512, 2, True), (768, 3, False))
+
+
+def _local_tile(n_tok: int, num_kv_heads: int) -> tuple[int, bool] | None:
+    """(queries per workgroup, shared Q staging) of the one- / two- / three-query tiles, or None (four-query kernels).
+    Hkv 1: one query to 256 tokens, two to 1025 (shared Q above one two-query workgroup per CU, 513-1025), three to
+    1536; Hkv 2: ``HKV2_TILES``."""
+    if num_kv_heads == 1:
+        if n_tok > 1536:
+            return None
+        return (1 if n_tok <= 256 else 2 if n_tok <= 1025 else 3), 512 < n_tok <= 1025
+    if num_kv_heads == 2:
+        return next(((tq, shared) for most, tq, shared in HKV2_TILES if n_tok <= most), None)
+    return None
+
+
 def supports_nvfp4_sparse_prefill(
     num_heads: int, num_kv_heads: int, head_dim: int, topk_blocks: int, block_size: int
 ) -> bool:
@@ -248,20 +265,19 @@ def nvfp4_sparse_prefill(
     n_wg = (n_tok + 3) // 4 * num_kv_heads
     rounds = 2 if n_wg > _num_cus(q.device) else 1
     fp8_args = (_fp8_lut(q.device).data_ptr(),) if compute_dtype == "fp8" else ()
-    # Hkv 1 small tiles by the measured crossovers: bf16 / fp16 (not with the fp16 scheduling ports) one query to
-    # 256 tokens, two to 1025, three to 1536; fp8 one to 512
+    # small tiles (bf16 / fp16, not with the fp16 scheduling ports) by the measured crossovers (``_local_tile``); fp8
+    # one query to 512 tokens at Hkv 1
     use_sched = sched and switches.PREFILL_MSA_SCHED and compute_dtype != "fp8"
-    local = (compute_dtype == "bf16" or (compute_dtype == "fp16" and not use_sched)) and num_kv_heads == 1 \
-        and n_tok <= 1536
+    tile = _local_tile(n_tok, num_kv_heads) if compute_dtype == "bf16" or (
+        compute_dtype == "fp16" and not use_sched) else None
     q_bf16 = compute_dtype == "fp8" and q.dtype == torch.bfloat16
     # the lazy rescale runs on the two- / three-query tiles and the two-round kernel; the default call keeps its arguments
-    lazy_local = {"lazy": True} if lazy_rescale and n_tok > 256 else {}
+    lazy_local = {"lazy": True} if lazy_rescale and tile is not None and tile[0] > 1 else {}
     lazy_grid = {"lazy": True} if lazy_rescale and rounds == 2 else {}
-    # Shared Q conversion wins above one two-query workgroup per CU (513-1025 tokens; see the README).
-    shared_local = {"q_shared": True} if 512 < n_tok <= 1025 else {}
-    exe = (_get_bf16_local(1 if n_tok <= 256 else 2 if n_tok <= 1025 else 3, fused_pack, fused_quant, compute_dtype == "fp16",
+    shared_local = {"q_shared": True} if tile is not None and tile[1] else {}
+    exe = (_get_bf16_local(tile[0], fused_pack, fused_quant, compute_dtype == "fp16",
                            q.dtype == torch.float16, **lazy_local, **shared_local)
-           if local else _get_kernel(
+           if tile is not None else _get_kernel(
             compute_dtype,
             fused_pack,
             rounds,
@@ -307,9 +323,13 @@ def nvfp4_sparse_prefill(
 # tiles; fp8 at one KV head also has the 513-1024 and 1088-1536 tiles
 WARM_TOKENS = (8, 512, 1024, 1536, 2048)
 WARM_TOKENS_FP8 = (8, 512, 1024, 1536, 2048)
+# two KV heads: the ``HKV2_TILES`` tiles, the one-round (fp8, scheduling ports) and two-round kernels
+WARM_TOKENS_HKV2 = (8, 256, 384, 1024)
 
 
-def _warm_tokens(compute_dtype: str) -> tuple[int, ...]:
+def _warm_tokens(compute_dtype: str, num_kv_heads: int = 1) -> tuple[int, ...]:
+    if num_kv_heads == 2:
+        return WARM_TOKENS_HKV2
     return WARM_TOKENS_FP8 if compute_dtype == "fp8" else WARM_TOKENS
 
 
@@ -322,7 +342,7 @@ def _prefill_mode(q, kv_cache, topk, block_table, query_req_id, query_abs_pos, n
 
 
 def _prefill_sizes(mode):
-    return _warm_tokens(mode[2])
+    return _warm_tokens(mode[2], mode[1])
 
 
 def _prefill_inputs(mode, n, q, *args, **kwargs):
@@ -358,7 +378,7 @@ def warm_up_prefill(device: torch.device, *, num_heads: int, num_kv_heads: int, 
     with torch.inference_mode():
         kv = torch.zeros((2, 2 * num_kv_heads, BLK, 72), dtype=torch.uint8, device=dev)
         one = torch.ones((), dtype=torch.float32, device=dev)
-        for n in _warm_tokens(compute_dtype):
+        for n in _warm_tokens(compute_dtype, num_kv_heads):
             q = torch.zeros((n, num_heads, D), dtype=torch.bfloat16, device=dev)
             idx = torch.full((num_kv_heads, n, TOPK), -1, dtype=torch.int32, device=dev)
             idx[..., 0] = 0

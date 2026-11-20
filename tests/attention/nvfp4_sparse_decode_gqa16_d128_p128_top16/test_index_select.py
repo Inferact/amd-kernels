@@ -2,9 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the amd-kernels project
 """``nvfp4_sparse_decode(..., index_score=, index_max_seq_len=)``: the attention takes the indexer's scores
 (``nvfp4_index_score_rows``) and writes ``topk_idx`` itself. Against the two-launch chain (``nvfp4_index_score_top16``
-then the attention on its ids): the ids bit for bit and the attention output bytes equal, on the fused routes (one KV
-head, top-16, bf16 or fp16, <= 256 rows: the rowxcd / prefetch / fixed kernels at ql 8 (fp16: rowxcd, else the
-generic kernel), the generic kernel at ql 4; the selector body runs in every attention workgroup) and on the route that launches the selector first (> 256 rows).
+then the attention on its ids): the ids bit for bit and the attention output bytes equal, on the fused routes (1 KV
+head <= 256 rows, 2 KV heads (index head h feeds KV head h) <= 1024 rows, top-16, bf16 or fp16: the rowxcd / prefetch /
+fixed kernels at ql 8 (fp16: rowxcd, else the generic kernel), the generic kernel at ql 1 / 4; the selector body runs in
+every attention workgroup) and on the route that launches the selector first (more rows).
 Short rows (< 16 blocks: the exact fallback, ids from memory), rows past 1792 blocks (the window loop), padding
 requests, 1-token rows, init / local blocks, a NaN index-q element, equal keys (ties), graph replay at other lengths,
 determinism."""
@@ -24,7 +25,7 @@ MAX = 1 << 20
 BLK, D, H = 128, 128, 16
 
 
-def build(lengths, ql, seed, nan_q=False, equal_keys=False):
+def build(lengths, ql, seed, nan_q=False, equal_keys=False, hkv=1):
     g = torch.Generator(device="cuda")
     g.manual_seed(seed)
     reqs = len(lengths)
@@ -35,18 +36,18 @@ def build(lengths, ql, seed, nan_q=False, equal_keys=False):
     if equal_keys:
         keys = keys[:1].expand(pages * BLK, D).contiguous()
     icache = iref.nvfp4_index_pages(keys)
-    kv = torch.randint(0, 256, (pages, 2, BLK, 72), dtype=torch.uint8, device="cuda", generator=g) & 0x77
+    kv = torch.randint(0, 256, (pages, 2 * hkv, BLK, 72), dtype=torch.uint8, device="cuda", generator=g) & 0x77
     bt = torch.zeros(reqs, -(-MAX // BLK), dtype=torch.int32, device="cuda")
     p = 1
     for r, n in enumerate(nb):
         bt[r, :n] = torch.randperm(n, device="cuda", generator=g).to(torch.int32) + p
         p += n
     seq = torch.tensor(lengths, dtype=torch.int32, device="cuda")
-    iq = (torch.randn(rows, 1, D, device="cuda", generator=g) * 0.5).to(torch.float8_e4m3fn)
+    iq = (torch.randn(rows, hkv, D, device="cuda", generator=g) * 0.5).to(torch.float8_e4m3fn)
     if nan_q:
         iq.view(torch.uint8)[rows // 2, 0, 7] = 0x7F
-    q = torch.randn(rows, H, D, device="cuda", generator=g).bfloat16()
-    return dict(iq=iq, icache=icache, kv=kv, bt=bt, seq=seq, q=q, ql=ql, rows=rows)
+    q = torch.randn(rows, H * hkv, D, device="cuda", generator=g).bfloat16()
+    return dict(iq=iq, icache=icache, kv=kv, bt=bt, seq=seq, q=q, ql=ql, rows=rows, hkv=hkv)
 
 
 def chain(c, init, local, fused, ids, out, score, compute=torch.bfloat16):
@@ -66,10 +67,10 @@ def chain(c, init, local, fused, ids, out, score, compute=torch.bfloat16):
 
 
 def buffers(c):
-    rows = c["rows"]
-    return (torch.full((1, rows, 16), -7, dtype=torch.int32, device="cuda"),
-            torch.full((rows, H, D), 7.0, dtype=torch.bfloat16, device="cuda"),
-            torch.full((1, rows, iref.score_width(MAX)), float("nan"), dtype=torch.float32, device="cuda"))
+    rows, hkv = c["rows"], c["hkv"]
+    return (torch.full((hkv, rows, 16), -7, dtype=torch.int32, device="cuda"),
+            torch.full((rows, H * hkv, D), 7.0, dtype=torch.bfloat16, device="cuda"),
+            torch.full((hkv, rows, iref.score_width(MAX)), float("nan"), dtype=torch.float32, device="cuda"))
 
 
 def same(c, init, local, monkeypatch=None, compute=torch.bfloat16):
@@ -88,7 +89,7 @@ def same(c, init, local, monkeypatch=None, compute=torch.bfloat16):
     chain(c, init, local, True, ib, ob, sb, compute)
     if monkeypatch is not None:
         monkeypatch.undo()
-        fused = c["rows"] <= 256  # rowxcd / prefetch / fixed (ql 8) or generic (ql 4)
+        fused = c["rows"] <= ah.SELECT_MAX_ROWS[c["hkv"]]  # rowxcd / prefetch / fixed (ql 8) or generic (ql 4)
         assert any(n.endswith("_select16") for n in names) == fused, names
     assert torch.equal(ia, ib), (ia - ib).abs().max()
     assert torch.equal(oa.view(torch.int16), ob.view(torch.int16))
@@ -122,6 +123,37 @@ def test_ids_and_output_match_the_two_launch_chain(ql, lengths, init, local, com
     c = build(lengths, ql, seed=len(lengths) * 131 + lengths[0] % 977 + init)
     ids, _ = same(c, init, local, monkeypatch, compute)
     assert int((ids == -7).sum()) == 0
+
+
+CASES_KV2 = [
+    (8, [32768]),  # 8 rows: the rowxcd kernels at 2 KV heads
+    (8, [131072 + 37, 900]),
+    (8, [0, 300, 1]),
+    (8, [240000, 0, 1000, 196608]),  # 1875 blocks: the window loop
+    (8, [1500, 16 * 128 + 9, 15 * 128 + 8, 8]),  # around 16 blocks: fallback / fast
+    (8, [40000] * 5),  # 40 rows
+    (8, [3000 + 997 * i for i in range(17)]),  # 136 rows
+    (8, [2000 + 501 * i for i in range(31)] + [0]),  # 256 rows
+    (8, [1500 + 37 * i for i in range(33)]),  # 264 rows: in the attention at 2 KV heads
+    (8, [700 + 97 * i for i in range(129)]),  # 1032 rows: the selector launch
+    (4, [65536, 9]),  # ql 4: the generic kernel
+    (4, [0, 3, 1900 * 128 + 3, 16 * 128]),
+    (4, [9000 + 1001 * i for i in range(16)]),
+    (1, [70000, 33, 0, 4096 + 5]),
+]
+
+
+@pytest.mark.parametrize("compute", [torch.bfloat16, torch.float16], ids=["bf16", "f16"])
+@pytest.mark.parametrize("ql,lengths", CASES_KV2)
+@pytest.mark.parametrize("init,local", [(0, 1), (2, 3)])
+def test_two_kv_heads_ids_and_output_match_the_two_launch_chain(ql, lengths, init, local, compute, monkeypatch):
+    """2 KV heads = 2 index heads (TP2): KV head h's workgroups select from index head h's scores."""
+    require_gfx950()
+    c = build(lengths, ql, seed=len(lengths) * 71 + lengths[0] % 977 + init, hkv=2)
+    ids, _ = same(c, init, local, monkeypatch, compute)
+    assert int((ids == -7).sum()) == 0
+    if max(lengths) > 16 * BLK:
+        assert not torch.equal(ids[0], ids[1])
 
 
 @pytest.mark.parametrize("kind", ["nan_q", "equal_keys"])

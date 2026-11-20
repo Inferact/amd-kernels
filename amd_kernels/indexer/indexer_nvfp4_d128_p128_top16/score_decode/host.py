@@ -153,37 +153,102 @@ def nvfp4_index_score_decode(
     )
 
 
+# Tests / benchmarks: pin the scorer ("page", "first_page", "first_page_xcd", "sector", "scan"; two heads: "page",
+# "first_page_xcd", "runs"), or "chunked" for ``nvfp4_index_score_decode``.
+PIN_SCORER: str | None = None
+# two heads: runs from 13 requests (32K-192K, 12: first page 18.7 vs runs 20.2 us, 16: 24.3 vs 21.1; sweep_decode_h2.py)
+RUNS_MIN_REQS = 13
+
+
+def _fast_scorer(reqs: int, query_len: int, heads: int) -> str | None:
+    """The scorer of ``reqs`` x ``query_len`` rows at ``heads`` index heads, or None (chunked). One head through 16
+    requests: two waves per page at 1 / 3 requests, a scalar first table entry at 2 (XCD-local score lines at 8 rows),
+    sectors at 4 x 8 rows, independent scans otherwise. Two heads: two waves per page at one request, the XCD-local
+    first-page scans to RUNS_MIN_REQS, then 16-block runs balanced over the workgroups."""
+    if PIN_SCORER is not None:
+        return None if PIN_SCORER == "chunked" else PIN_SCORER
+    if query_len not in (4, 8) or reqs < 1:
+        return None
+    if heads == 2:
+        from .score_runs_d128_p128_h2 import MAX_REQS
+
+        return "page" if reqs == 1 else "first_page_xcd" if reqs < RUNS_MIN_REQS else "runs" if reqs <= MAX_REQS \
+            else None
+    if heads != 1 or reqs > 16:
+        return None
+    if reqs in (1, 3):
+        return "page"
+    if reqs == 2:
+        return "first_page_xcd" if query_len == 8 else "first_page"
+    if reqs == 4 and query_len == 8:
+        return "sector"
+    return "scan"
+
+
+# Tests / benchmarks: pin the run scorer's grid and unit bound.
+PIN_RUNS_GRID: int | None = None
+PIN_RUNS_UNITS: int | None = None
+# two workgroups per CU, 4-block units below 64 runs: within 2% of the best of grids 256-2048 (sweep_decode_h2.py)
+RUNS_GRID = 512
+RUNS_UNITS = 256
+
+
+def _score_runs(q_idx, index_cache, score, block_table, seq_lens, init_blocks, local_blocks, query_len):
+    """Two heads, runs of 16 blocks balanced over the workgroups (``score_runs_d128_p128_h2``)."""
+    from .score_runs_d128_p128_h2 import compile_score_runs
+
+    _run_compiled(
+        compile_score_runs(query_len), q_idx.data_ptr(), index_cache.data_ptr(),
+        nvfp4_e4m3_lut(q_idx.device).data_ptr(), score.data_ptr(), block_table.data_ptr(), seq_lens.data_ptr(),
+        int(index_cache.stride(0)), int(score.stride(0)), int(score.stride(1)), _end_bytes(score),
+        int(block_table.stride(0)), _end_bytes(block_table), q_idx.shape[0] // query_len, int(init_blocks),
+        int(local_blocks), PIN_RUNS_GRID or RUNS_GRID, PIN_RUNS_UNITS or RUNS_UNITS, _current_stream(),
+    )
+
+
+def _columns_ok(q_idx, score) -> bool:
+    """Two heads: Q rows ``[rows, 2, 128]`` and the score heads contiguous, 16-B aligned score rows
+    (``columns.columns``)."""
+    rows, heads, _ = q_idx.shape
+    return heads == 1 or (q_idx.stride(1) == 128 and q_idx.stride(0) == heads * 128
+                          and score.stride(0) == rows * score.stride(1) and score.stride(1) % 4 == 0)
+
+
 def _score_rows(q_idx, index_cache, score, block_table, seq_lens, init_blocks,
                 local_blocks, query_len, max_seq_len):
-    """The scores of ``nvfp4_index_score_top16``: one index head x 4 / 8 rows through 16 requests on the one-head
-    scorers (two waves per page at 1 / 3 requests, a scalar first table entry at 2, sectors at 4 x 8 rows, independent
-    scans otherwise), else ``nvfp4_index_score_decode``."""
+    """The scores of ``nvfp4_index_score_top16``: the scorer of ``_fast_scorer``, else ``nvfp4_index_score_decode``."""
     rows, heads, _ = q_idx.shape
-    plain_head = heads == 1 and query_len in (4, 8) and rows > 0
-    if plain_head and rows // query_len <= 16:
-        from .score_d128_p128_h1 import compile_score
+    reqs = rows // query_len
+    kind = _fast_scorer(reqs, query_len, heads) if rows > 0 and _columns_ok(q_idx, score) else None
+    if kind == "runs":
+        _score_runs(q_idx, index_cache, score, block_table, seq_lens, init_blocks, local_blocks, query_len)
+    elif kind is not None:
         max_blocks = max(1, _cdiv(max_seq_len, 128))
-        reqs = rows // query_len
-        page_coop = reqs in (1, 3)
-        waves = 2 if page_coop else 1
+        waves = 2 if kind == "page" else 1
         splits = min(max(1, TARGET_WAVES // (waves * reqs)), max_blocks)
         # A lane holds one strided page-table entry: a 1M context needs at most eleven per wave.
         assert _cdiv(max_blocks, splits) <= 64
-        from .score_page_d128_p128_h1 import compile_score_page
-        if reqs == 2:
-            # XCD-local 128-B score lines at 8 rows only
-            from .score_firstpage_d128_p128_h1 import compile_score_first_page
-            exe = compile_score_first_page(query_len, query_len == 8)
-        elif reqs == 4 and query_len == 8:
-            from .score_sector_d128_p128_h1 import compile_score_sector
-            exe = compile_score_sector(query_len)
+        if heads == 1:
+            from . import score_d128_p128_h1 as scan, score_firstpage_d128_p128_h1 as first
+            from . import score_page_d128_p128_h1 as page, score_sector_d128_p128_h1 as sector
+
+            if kind == "page":
+                exe = page.compile_score_page(query_len)
+            elif kind in ("first_page", "first_page_xcd"):
+                exe = first.compile_score_first_page(query_len, kind == "first_page_xcd")
+            elif kind == "sector":
+                exe = sector.compile_score_sector(query_len)
+            else:
+                exe = scan.compile_score(query_len, waves)
         else:
-            exe = compile_score_page(query_len) if page_coop else compile_score(query_len, waves)
+            from . import score_firstpage_d128_p128_h2 as first, score_page_d128_p128_h2 as page
+
+            exe = page.compile_score_page(query_len) if kind == "page" else first.compile_score_first_page(query_len)
         _run_compiled(
             exe, q_idx.data_ptr(), index_cache.data_ptr(),
             nvfp4_e4m3_lut(q_idx.device).data_ptr(), score.data_ptr(),
             block_table.data_ptr(), seq_lens.data_ptr(), int(index_cache.stride(0)),
-            int(q_idx.stride(0)), int(score.stride(1)), _end_bytes(score),
+            int(q_idx.stride(0) if heads == 1 else q_idx.stride(1)), int(score.stride(1)), _end_bytes(score),
             _end_bytes(block_table), max_blocks, splits, reqs, int(block_table.stride(0)), int(init_blocks),
             int(local_blocks), _current_stream(),
         )
@@ -247,8 +312,7 @@ def nvfp4_index_top16_from_scores(
     from ..topk import index_topk_decode_indices
 
     heads, rows = int(topk_idx.shape[0]), int(rows)
-    plain_head = heads == 1 and query_len in (4, 8) and rows > 0
-    if plain_head and rows <= 128:
+    if _plain_selector(rows, query_len, heads):
         _run_compiled(
             _get_top16_plain_wave4(), score.data_ptr(), int(score.stride(0)),
             int(score.stride(1)), score_width(max_seq_len), seq_lens.data_ptr(),
@@ -259,6 +323,18 @@ def nvfp4_index_top16_from_scores(
         index_topk_decode_indices(
             score, topk_idx, seq_lens, max_seq_len=max_seq_len, query_len=query_len
         )
+
+
+# Tests / benchmarks: pin the selector (True: the plain four-wave one).
+PIN_PLAIN: bool | None = None
+
+
+def _plain_selector(rows: int, query_len: int, heads: int) -> bool:
+    """The plain-order four-wave selector through 128 rows at one head, 256 at two (x 4 / 8 rows per request), else
+    ``topk.index_topk_decode_indices`` (two heads, sweep_decode_h2.py: 256 rows 3.33 vs 3.62 us, 512 4.12 vs 3.87)."""
+    if PIN_PLAIN is not None:
+        return PIN_PLAIN
+    return query_len in (4, 8) and 0 < rows <= {1: 128, 2: 256}.get(heads, 0)
 
 
 @functools.cache

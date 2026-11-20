@@ -7,11 +7,11 @@ over dims 0-63 of 128 (halves of 32), and the e4m3 K / V insert into the cache p
 Caller: the MiniMax-M3.1 DSpark draft (5 layers): the query block's fused qkv row and the context rows' fused K / V
 row, which feeds all 5 layers' caches. Cache `[pages, kv_heads, page, 256]` e4m3 (128 K bytes, then 128 V bytes per
 token), e4m3 of `value / scale` saturated at +-448, per-tensor fp32 scales; `cos_sin_cache [rows, 64]` bf16 (cos |
-sin). Served: TP4 16 q / 1 KV heads, page 128. Contract: `reference.py`. The qkv norm takes `rstd` and the products
-in fp64 (as Inductor compiles the Triton norm); the multi-layer norm stays in fp32 (the eager Triton norm), so the two
-K paths can differ by one bf16 ulp. Every output is within one bf16 ulp / e4m3 step of the reference or `ROW_ATOL`
-(2^-6) of its row maximum, at least `EXACT_MIN` (99.9%) bit-equal; cache bytes outside the written slots stay
-unchanged.
+sin). Served: TP4 16 q / 1 KV and TP2 32 q / 2 KV heads, page 128. Contract: `reference.py`. The qkv norm takes
+`rstd` and the products in fp64 (as Inductor compiles the Triton norm); the multi-layer norm stays in fp32 (the eager
+Triton norm), so the two K paths can differ by one bf16 ulp. Every output is within one bf16 ulp / e4m3 step of the
+reference or `ROW_ATOL` (2^-6) of its row maximum, at least `EXACT_MIN` (99.9%) bit-equal; cache bytes outside the
+written slots stay unchanged.
 
 ## Entry points
 
@@ -38,7 +38,9 @@ Bitwise the Triton / C++ chain of the same ops.
 | Kernel | Heads | Page | Rows -> us |
 |---|---|---|---|
 | qkv | 16 q / 1 KV | 128 | 4 / 64 / 256 / 1024 -> 2.00 / 2.65 / 3.37 / 7.42 |
+| qkv | 32 q / 2 KV | 128 | 4 / 64 / 256 / 1024 / 2048 -> 1.95 / 2.85 / 4.67 / 12.38 / 21.83 |
 | multi-layer, 5 layers | 1 KV | 128 | 4 / 384 / 4096 -> 1.95 / 2.91 / 12.93 |
+| multi-layer, 5 layers | 2 KV | 128 | 4 / 384 / 4096 / 8192 -> 1.94 / 3.88 / 24.47 / 46.29 |
 
 ## Tests
 

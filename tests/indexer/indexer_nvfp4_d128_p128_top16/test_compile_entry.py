@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the amd-kernels project
-"""First-call worker warm-up covers every one-GPU top-16 variant."""
+"""First-call worker warm-up covers every one-GPU top-16 variant at one index head (TP4) and two (TP2)."""
 import json
 import os
 import subprocess
@@ -8,7 +8,7 @@ import sys
 import pytest
 
 
-def scenario(ql, workers):
+def scenario(ql, workers, heads=1):
     import torch
     from flydsl.compiler.jit_function import MlirCompiler
     from amd_kernels import warm_up
@@ -24,16 +24,16 @@ def scenario(ql, workers):
     MlirCompiler.compile = spy
     cache = torch.zeros(2, 128, 72, device='cuda', dtype=torch.uint8)
     def call(n, ctx):
-        q = torch.zeros(n * ql, 1, 128, device='cuda', dtype=torch.float8_e4m3fn)
+        q = torch.zeros(n * ql, heads, 128, device='cuda', dtype=torch.float8_e4m3fn)
         table = torch.zeros(n, max(1, (ctx + 127) // 128), device='cuda', dtype=torch.int32)
         seq = torch.full((n,), ql, device='cuda', dtype=torch.int32)
-        ids = torch.empty(1, n * ql, 16, device='cuda', dtype=torch.int32)
+        ids = torch.empty(heads, n * ql, 16, device='cuda', dtype=torch.int32)
         nvfp4_index_score_top16(q, cache, table, seq, 0, 1, ids, query_len=ql, max_seq_len=ctx)
     call(1, 1024)
     warm = len(count)
     late = []
     for ctx in (8192, 65536, 196608, 524288, 1048576):
-        for n in (1, 2, 3, 4, 5, 8, 9, 15, 16, 17, 31, 32, 33, 64, 65, 128, 129, 256):
+        for n in (1, 2, 3, 4, 5, 8, 9, 12, 13, 15, 16, 17, 31, 32, 33, 64, 65, 128, 129, 256):
             before = len(count)
             call(n, ctx)
             if len(count) != before:
@@ -42,12 +42,13 @@ def scenario(ql, workers):
     return dict(warm=warm, late=late, reported=warm_up.late_compiles(), warmed=len(warm_up.warmed()))
 
 
+@pytest.mark.parametrize('heads', [1, 2], ids=['h1', 'h2'])
 @pytest.mark.parametrize('ql', [4, 8])
 @pytest.mark.parametrize('workers', [1, 2], ids=['in_process', 'workers'])
-def test_first_call_warmup(ql, workers, tmp_path):
+def test_first_call_warmup(ql, workers, heads, tmp_path):
     from .inputs import require_gfx950
     require_gfx950()
-    proc = subprocess.run([sys.executable, '-m', __name__, str(ql), str(workers)],
+    proc = subprocess.run([sys.executable, '-m', __name__, str(ql), str(workers), str(heads)],
         capture_output=True, text=True, timeout=900,
         env={**os.environ, 'FLYDSL_RUNTIME_ENABLE_CACHE': '1',
              'FLYDSL_RUNTIME_CACHE_DIR': str(tmp_path / 'flydsl')})
@@ -60,4 +61,4 @@ def test_first_call_warmup(ql, workers, tmp_path):
 
 
 if __name__ == '__main__':
-    print(json.dumps(scenario(int(sys.argv[1]), int(sys.argv[2]))))
+    print(json.dumps(scenario(int(sys.argv[1]), int(sys.argv[2]), int(sys.argv[3]))))

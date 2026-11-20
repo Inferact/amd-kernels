@@ -232,7 +232,7 @@ def same_plan_kwargs(key):
 CONTRACT = []
 for _config in SERVED:
     for _quant in (False, True):
-        _extra = {2, 3, 4} if _config in ("kv1_bf16_ql8", "kv1_f16_ql8") else set()
+        _extra = {2, 3, 4} if _config.endswith("_ql8") else set()
         _reqs = sorted(set(variants(_config, _quant).values()) | {SERVED[_config][3]} | _extra)
         CONTRACT += [(_config, _quant, r) for r in _reqs]
 
@@ -312,10 +312,39 @@ def test_explicit_schedules_one_kv_head(compute, ql, reqs, splits, random_bytes,
     assert torch.equal(outs[0], outs[1])
 
 
+EXPLICIT_KV2 = [
+    (compute, ql, reqs, splits, random_bytes, xcd)
+    for compute in (torch.bfloat16, torch.float16)
+    for ql, reqs in ((1, 6), (4, 6), (8, 6), (8, 2), (8, 4))
+    for splits in (None, 1, 2, 4, 8)
+    for random_bytes in (False, True)
+    for xcd in (0, XCDS)
+]
+
+
+@pytest.mark.parametrize(
+    "compute,ql,reqs,splits,random_bytes,xcd",
+    EXPLICIT_KV2,
+    ids=[f"{str(a)[6:]}-ql{b}-r{c}-s{d}-{'random' if e else 'quantized'}-xcd{f}" for a, b, c, d, e, f in EXPLICIT_KV2],
+)
+@torch.inference_mode()
+def test_explicit_schedules_two_kv_heads(compute, ql, reqs, splits, random_bytes, xcd):
+    """2 KV heads (32 query heads, TP2), bf16 and fp16 compute: every split count with and without the XCD grid (2
+    and 4 requests of 8 rows: the rowxcd kernels at 2 KV heads), realistic caches and caches of random bytes."""
+    require_gfx950()
+    lengths = [9, 300, 2100, 20000, 131, 4096][:reqs]
+    case = make_case(2, ql, lengths, seed=4, random_bytes=random_bytes)
+    outs = [run(case, compute, splits=splits, xcd_count=xcd) for _ in range(2)]
+    ref = reference(case, compute)
+    torch.cuda.synchronize()
+    check_bf16(f"kv2 {compute} ql{ql} s{splits} xcd{xcd}", outs[0], ref, live_rows(case))
+    assert torch.equal(outs[0], outs[1])
+
+
 OTHER = [
     (hkv, compute, ql, splits, xcd)
-    for hkv, compute in ((1, torch.float16),)
-    for ql, splits, xcd in ((1, 1, 0), (4, 4, XCDS), (8, 4, 0))
+    for hkv, compute in ((1, torch.float16), (2, torch.float16))
+    for ql, splits, xcd in ((1, 1, 0), (4, 4, XCDS), (8, 4, 0), (8, 4, XCDS))
 ]
 
 
@@ -326,7 +355,7 @@ OTHER = [
 )
 @torch.inference_mode()
 def test_fp16_explicit_splits_with_padding(hkv, compute, ql, splits, xcd):
-    """fp16 on 1 KV head at explicit splits, padded and plain grids, with a graph padding request."""
+    """fp16 on 1 and 2 KV heads at explicit splits, padded and plain grids, with a graph padding request."""
     require_gfx950()
     lengths = [131, 4097, 2100, 777, 65, 0]
     case = make_case(hkv, ql, lengths, seed=42)
@@ -343,6 +372,10 @@ QUANT_BYTES = [
     for hkv, ql, splits, xcd, tile in (
         (1, 1, 1, 0, 0),
         (1, 4, 4, XCDS, 16),
+        (2, 1, 1, 0, 0),
+        (2, 4, 4, XCDS, 16),
+        (2, 8, 4, XCDS, 16),
+        (2, 8, 1, XCDS, 0),
     )
     for compute in (torch.bfloat16, torch.float16)
 ]
@@ -447,8 +480,8 @@ def poison_tail(case, hkv):
 
 POISON = [
     (hkv, compute, ql, reqs)
-    for hkv, compute in ((1, torch.bfloat16), (1, torch.float16))
-    for ql, reqs in ((1, 6), (4, 6), (8, 6), (8, 4))
+    for hkv, compute in ((1, torch.bfloat16), (1, torch.float16), (2, torch.bfloat16), (2, torch.float16))
+    for ql, reqs in ((1, 6), (4, 6), (8, 6), (8, 4), (8, 2))
 ]
 
 
@@ -458,7 +491,8 @@ POISON = [
 @torch.inference_mode()
 def test_bytes_past_the_length_are_ignored(hkv, compute, ql, reqs):
     """NaN scales and random codes past each request's length (its last block, a row's own block) leave the output
-    finite and bit for bit the clean cache's (4 requests of 8 rows: the rowxcd kernels at 1 KV head)."""
+    finite and bit for bit the clean cache's (4 requests of 8 rows: the rowxcd kernels at 1 KV head, 2 requests at
+    2 KV heads)."""
     require_gfx950()
     lengths = [131, 4097, 2100, 777, 65, 300][:reqs]
     case = make_case(hkv, ql, lengths, seed=3)
@@ -471,15 +505,18 @@ def test_bytes_past_the_length_are_ignored(hkv, compute, ql, reqs):
 
 
 @pytest.mark.parametrize("compute", [torch.bfloat16, torch.float16], ids=["bf16", "f16"])
-@pytest.mark.parametrize("reqs", [1, 2, 4, 8, 16, 20, 32, 64])
+@pytest.mark.parametrize(
+    "hkv,reqs", [(1, r) for r in (1, 2, 4, 8, 16, 20, 32, 64)] + [(2, r) for r in (1, 2, 4, 8, 13, 32)]
+)
 @torch.inference_mode()
-def test_bitwise_next_to_mfma_waves(reqs, compute):
-    """The TP4 paths (1 KV head, 8 rows per request) with a high-priority MFMA kernel (``tests/mfma_spinner.py``) on
-    the same CUs: the output stays bit for bit the same (gfx950 has given wrong VALU products next to MFMA waves)."""
+def test_bitwise_next_to_mfma_waves(hkv, reqs, compute):
+    """The TP4 / TP2 paths (1 / 2 KV heads, 8 rows per request) with a high-priority MFMA kernel
+    (``tests/mfma_spinner.py``) on the same CUs: the output stays bit for bit the same (gfx950 has given wrong VALU
+    products next to MFMA waves)."""
     from tests.mfma_spinner import mfma_spinner
 
     require_gfx950()
-    case = make_case(1, 8, lengths_for(reqs, seed=31, pad=1 if reqs > 1 else 0), seed=31)
+    case = make_case(hkv, 8, lengths_for(reqs, seed=31, pad=1 if reqs > 1 else 0), seed=31)
     clean = run(case, compute)
     main, side = torch.cuda.Stream(), torch.cuda.Stream(priority=-1)
     spin = mfma_spinner(torch.cuda.get_device_properties(0).multi_processor_count)
@@ -495,6 +532,7 @@ def test_bitwise_next_to_mfma_waves(reqs, compute):
     (1, 1, 1, torch.bfloat16), (1, 4, 1, torch.bfloat16),
     (1, 8, 2, torch.bfloat16), (1, 8, 5, torch.bfloat16),
     (1, 4, 1, torch.float16), (1, 8, 1, torch.float16), (1, 8, 5, torch.float16),
+    (2, 8, 1, torch.float16), (2, 8, 4, torch.float16), (2, 8, 1, torch.bfloat16), (2, 4, 2, torch.float16),
 ])
 @torch.inference_mode()
 def test_strided_pages(hkv, ql, repeats, compute):
@@ -514,15 +552,16 @@ def test_strided_pages(hkv, ql, repeats, compute):
     assert torch.isfinite(dense).all() and torch.equal(dense, strided)
 
 
+@pytest.mark.parametrize("hkv", [1, 2])
 @pytest.mark.parametrize("ql", [1, 4, 8])
 @pytest.mark.parametrize("splits", [1, 4])
 @torch.inference_mode()
-def test_padding_requests(ql, splits):
+def test_padding_requests(ql, splits, hkv):
     """Graph padding requests (length 0) between real ones and an all-padding batch: the real rows match the
     reference, the padding rows are zero."""
     require_gfx950()
     lengths = [700, 0, 3000, 0, 0, 129]
-    case = make_case(1, ql, lengths, seed=1)
+    case = make_case(hkv, ql, lengths, seed=1)
     compute = torch.bfloat16
     out = run(case, compute, splits=splits)
     ref = reference(case, compute)

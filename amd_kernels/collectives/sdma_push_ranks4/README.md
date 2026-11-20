@@ -46,3 +46,4 @@ torchrun --nproc-per-node 4 benchmarks/collectives/sdma_push_ranks4/bench_engine
 ```
 
 `test_transport.py`: gather / reduce-scatter-shaped pushes, 80 rounds, a slowed producer, sources dropped early.
+`test_agents.py`: every rank's HSA agent is its GPU (keys unique across PCI domains, checked by agent UUID).

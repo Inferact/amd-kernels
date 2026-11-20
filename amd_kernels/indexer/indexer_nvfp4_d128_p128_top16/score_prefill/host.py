@@ -99,6 +99,8 @@ def _get_kernel_shared(heads: int, mq: int, fp8: bool):
 SMALL_WORK = 4096
 MID_WORK = 16384
 SMALL_TARGET = 512
+# two heads: kernel_shared through MID_WORK, 32-row wave tiles below this (2048 + 32K: 31.5 -> 23.9; sweep_prefill_plan)
+H2_MQ1_WORK = 256
 # Tests / benchmarks: pin the kernel (True: kernel_shared), its 32-row tiles per wave, or the workgroup target.
 PIN_SHARED: bool | None = None
 PIN_MQ: int | None = None
@@ -191,9 +193,10 @@ def _score_plan(heads, batch, max_query_len, max_seq_len, device, exact=False,
     """The scorer, segments, query tiles, grid and route of a call; shared by the standalone and gathered chains."""
     max_blocks = _cdiv(max_seq_len, _kernel.BLK)
     work = max_blocks * _cdiv(max_query_len, 256) * batch * heads
-    small = max_query_len * heads <= 128 or work < SMALL_WORK
+    tiny = max_query_len * heads <= 128
+    small = tiny or work < (MID_WORK if heads == 2 else SMALL_WORK)
     shared = exact or (small if PIN_SHARED is None else PIN_SHARED)
-    mq = PIN_MQ or (1 if small else 2)
+    mq = PIN_MQ or (1 if small and (heads != 2 or tiny or work < H2_MQ1_WORK) else 2)
     target = PIN_TARGET or (
         SMALL_TARGET
         if shared and work < MID_WORK

@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the amd-kernels project
-"""``kernel.py`` with the indexer's top-16 selector as prologue (one KV head = one index head, top-16).
+"""``kernel.py`` with the indexer's top-16 selector as prologue (index head h = KV head h, top-16).
 
 Each workgroup first selects its row's 16 blocks from the index scores (``row_top16_prologue_ids``, the indexer's
 plain-order four-wave selector), stores them to ``topk_idx`` (every split of a row stores the same bytes) and attends
@@ -36,11 +36,17 @@ def compile_nvfp4_sparse_decode_select(
     quant: bool = False,
     exact_fp16: bool = False,
     tail: bool = False,
+    hkv: int = 1,
+    row_spread: bool = False,
 ):
-    """The launcher; the arguments of ``kernel.compile_nvfp4_sparse_decode``."""
+    """The launcher; the arguments of ``kernel.compile_nvfp4_sparse_decode``; ``hkv`` 2: KV head h selects from index
+    head h's scores (``i64_s_row`` packs the row stride and, in its high word, the head stride)."""
     assert 1 <= topk <= 64 and splits >= 1
+    assert hkv in (1, 2), hkv
+    HKV = hkv
     assert not tail or xcds > 0, "the tail grid places a pair's splits by XCD"
-    SPLITS, TOPK, XCDS, TAIL = splits, topk, xcds, tail
+    assert not row_spread or (xcds > 0 and not tail)
+    SPLITS, TOPK, XCDS, TAIL, ROW_SPREAD = splits, topk, xcds, tail, row_spread
     PART_SCOPE = 0 if XCDS else AGENT_SCOPE
     mfma = "f16" if exact_fp16 else "bf16"  # the MFMA operand dtype
     name = (
@@ -48,6 +54,8 @@ def compile_nvfp4_sparse_decode_select(
         + (f"_xcd{XCDS}" if XCDS else "")
         + ("_mxfp8" if quant else "")
         + ("_tail" if tail else "")
+        + ("_rowspread" if row_spread else "")
+        + ("_kv2" if HKV == 2 else "")
         + "_select16"
     )
 
@@ -130,6 +138,12 @@ def compile_nvfp4_sparse_decode_select(
             sb.to(fx.Int32).to(fx.Int8), qsr, s_off, mask=row < i32_rows
         )
 
+    def score_row(arg_score, i64_s_row, rowc, kvh):
+        """The address of row ``rowc``'s index scores of index head ``kvh``."""
+        if HKV == 1:
+            return arg_score + rowc.to(fx.Int64) * i64_s_row * 4
+        return arg_score + (rowc.to(fx.Int64) * (i64_s_row & 0xFFFFFFFF) + kvh.to(fx.Int64) * (i64_s_row >> 32)) * 4
+
     # the arguments of the first (dependent) loads lead: the first 56 bytes arrive preloaded in SGPRs
     @flyc.kernel(name=name, known_block_size=[64 * NW, 1, 1])
     def kernel(
@@ -158,8 +172,8 @@ def compile_nvfp4_sparse_decode_select(
         f32_c: fx.Float32,  # sm_scale * log2(e)
         i32_heavy: fx.Int32,  # tail: whole-round pairs (a multiple of XCDS)
         i32_tpx: fx.Int32,  # tail: tail pairs per XCD
-        arg_score: fx.Int64,  # [1, >= rows, >= width] fp32 index scores
-        i64_s_row: fx.Int64,  # their row stride (elements)
+        arg_score: fx.Int64,  # [Hkv, >= rows, >= width] fp32 index scores
+        i64_s_row: fx.Int64,  # their row stride (elements); at 2 KV heads | the head stride << 32
         i32_width: fx.Int32,  # score_width(max_seq_len) of the indexer
     ):
         smem = fx.SharedAllocator().allocate(Shared).peek()
@@ -210,7 +224,7 @@ def compile_nvfp4_sparse_decode_select(
             row = fx.Int32(fx.rocdl.readfirstlane(T.i32, pair // i32_hkv))
             kvh = fx.Int32(fx.rocdl.readfirstlane(T.i32, pair % i32_hkv))
         else:
-            if const_expr(XCDS > 0):
+            if const_expr(XCDS > 0 and not ROW_SPREAD):
                 # grid.x is padded to XCDS x ql: a permutation that puts each request's ql rows on one XCD (padding
                 # rows map past i32_rows)
                 xcd = bx % XCDS
@@ -230,11 +244,11 @@ def compile_nvfp4_sparse_decode_select(
 
         # lane = top-k slot: its logical block and page (-1: none)
         slot_ok = lane < TOPK
-        # the row's top-16 from its index scores (one KV head = one index head), stored as the selector kernel stores
-        # it; padding rows redo row 0's
+        # the row's top-16 from its index scores (index head = KV head), stored as the selector kernel stores it;
+        # padding rows redo row 0's
         id_row = arg_topk + (kvh * i32_topk_hs + rowc * TOPK).to(fx.Int64) * 4
         fast = row_top16_prologue_ids(
-            tx, arg_score + rowc.to(fx.Int64) * i64_s_row * 4, i32_width, arg_seq,
+            tx, score_row(arg_score, i64_s_row, rowc, kvh), i32_width, arg_seq,
             rowc, i32_ql, smem.cand.ptr, smem.sel.ptr, smem.tmp.ptr, id_row,
         )
         blk_lds = fx.Int32(smem.tmp.ptr[lane % TOPK])

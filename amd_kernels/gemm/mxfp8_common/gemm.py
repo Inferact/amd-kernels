@@ -7,12 +7,12 @@ of every MXFP8 linear (``mxfp8_linear``, ``mxfp8_gemm``, ``mxfp8_gemm_shuffled``
 Both implementations consume the same E4M3 weights and E8M0 per-32 scales.
 The AITER implementation is adapted from PR #4254 at revision 1e2e3a5 (its MXFP8 case).
 
-The tuned table is ``mxfp8_gemm_tuned.py``; the switches are constants at their
-served default; ``DBO`` / ``set_dbo_query`` stand in for vLLM's ``dbo_enabled()``;
-and ``mxfp8_linear`` / ``mxfp8_gemm`` take an optional explicit ``config`` (tests and
-benchmarks). ``_select_config`` picks the table row. The kernels and rows of
-one shape live in that shape's folder (``_SHAPE_HOSTS``: gemm/mxfp8_n2560_k6144,
-mxfp8_n6144_k2048, mxfp8_n6144_k8192).
+Each shape's rows (and kernels of its own) live in its folder (``_SHAPE_HOSTS``:
+gemm/mxfp8_n<N>_k<K>/host.py, ``ROWS`` and ``select``); ``_select_config`` asks it and falls
+back to generic tiles for a shape without one. The switches are constants at their served
+default; ``DBO`` / ``set_dbo_query`` stand in for vLLM's ``dbo_enabled()``; and
+``mxfp8_linear`` / ``mxfp8_gemm`` take an optional explicit ``config`` (tests and
+benchmarks).
 """
 
 import csv
@@ -20,11 +20,11 @@ import dataclasses
 import functools
 import importlib
 import io
+import threading
 from dataclasses import dataclass
 
 import torch
 
-from .mxfp8_gemm_tuned import TUNED_CSV
 
 MXFP8_VALUE_DTYPE = torch.float8_e4m3fn
 MXFP8_SCALE_DTYPE = torch.uint8
@@ -57,26 +57,44 @@ _DECODE_KERNEL = "decode"
 # pre-quantized activation (mxfp8_gemm) runs such a row as a plain decode row
 _DECODE_FQ_KERNEL = "decode_fq"
 _DECODE_KERNELS = (_DECODE_KERNEL, _DECODE_FQ_KERNEL)
+# The split-K decode kernel (mxfp8_gemm_decode_splitk.py) rows: tile_m = 16 * row tiles of an
+# m-block, tile_n = 16 * column tiles per MFMA wave * waves_m, waves_m = MFMA waves, waves_n =
+# loader waves, split_k = K splits (summed in the kernel), la_w = W steps ahead, la_a = A ring
+# slots (0: as many as the LDS holds); same (16, 16) activation as the decode rows.
+_DECODE_SPLITK_KERNEL = "decode_splitk"
 # the LDS-staged kernel (mxfp8_gemm_staged.py)
 _STAGED_KERNEL = "staged_ab"
 # rows whose activation is the weight's (16, 16) code layout (the decode-tier rows): only a
 # producer that writes that layout (``prequant_code_tile_rows``) or a caller that quantizes
 # itself (allow_decode) may select them
-_SHUFFLED_A_KERNELS = _DECODE_KERNELS
+_SHUFFLED_A_KERNELS = (*_DECODE_KERNELS, _DECODE_SPLITK_KERNEL)
 # the persistent 4-wave kernel (mxfp8_gemm_4wave.py): a 256x256 tile per workgroup of 4
 # waves, min(tiles, 256) workgroups; `_nt` = non-temporal output stores (the output
 # larger than the 256 MB infinity cache); row-major codes, preshuffled scales, N % 256 == 0
 _FOURWAVE_KERNEL = "4wave"
 _FOURWAVE_NT_KERNEL = "4wave_nt"
 _FOURWAVE_KERNELS = (_FOURWAVE_KERNEL, _FOURWAVE_NT_KERNEL)
-# Shapes with kernels of their own (gemm/mxfp8_n<N>_k<K>/host.py): ``select`` (their rows
-# ahead of the table), ``LAUNCHERS`` (kernel name -> launch), and optionally
+# The shape folders (gemm/mxfp8_n<N>_k<K>/host.py): ``ROWS`` (the shape's rows, ``parse_rows``;
+# ``tuned_shapes`` lists a shape with rows for a dtype), ``select`` (the config for a row
+# count), ``LAUNCHERS`` (kernel name -> launch of the folder's own kernels), and optionally
 # ``select_prequant``, ``select_deferred``, ``decode_launcher``. The dispatcher imports a
 # host on first use.
 _SHAPE_HOSTS = {
+    (1280, 6144): "amd_kernels.gemm.mxfp8_n1280_k6144.host",
+    (1536, 6144): "amd_kernels.gemm.mxfp8_n1536_k6144.host",
+    (2304, 6144): "amd_kernels.gemm.mxfp8_n2304_k6144.host",
     (2560, 6144): "amd_kernels.gemm.mxfp8_n2560_k6144.host",
+    (3072, 6144): "amd_kernels.gemm.mxfp8_n3072_k6144.host",
+    (4608, 6144): "amd_kernels.gemm.mxfp8_n4608_k6144.host",
+    (4992, 6144): "amd_kernels.gemm.mxfp8_n4992_k6144.host",
+    (6144, 768): "amd_kernels.gemm.mxfp8_n6144_k768.host",
+    (6144, 1536): "amd_kernels.gemm.mxfp8_n6144_k1536.host",
     (6144, 2048): "amd_kernels.gemm.mxfp8_n6144_k2048.host",
+    (6144, 3072): "amd_kernels.gemm.mxfp8_n6144_k3072.host",
+    (6144, 4096): "amd_kernels.gemm.mxfp8_n6144_k4096.host",
+    (6144, 6144): "amd_kernels.gemm.mxfp8_n6144_k6144.host",
     (6144, 8192): "amd_kernels.gemm.mxfp8_n6144_k8192.host",
+    (12288, 6144): "amd_kernels.gemm.mxfp8_n12288_k6144.host",
 }
 
 
@@ -113,9 +131,26 @@ _PRELOAD_HINTS = {
 def _load_tuned_configs() -> dict[
     tuple[int, int, str], tuple[tuple[int, _Config], ...]
 ]:
+    """Every shape folder's rows (``ROWS``), by (N, K, out dtype)."""
+    rows = {}
+    for n, k in _SHAPE_HOSTS:
+        rows.update(_shape_host(n, k).ROWS)
+    return rows
+
+
+@functools.cache
+def parse_rows(text: str) -> dict[tuple[int, int, str], tuple[tuple[int, _Config], ...]]:
+    """A shape folder's rows (``ROWS``, read with ``select_from_rows``) from CSV text, checked, by (N, K, out dtype).
+
+    Graph-replay tuned on one MI355X with pointer-distinct rotating weights above the LLC. One row per (M upper
+    bound, N, K, output dtype): ``M`` is an inclusive upper bound, the rows of a shape are scanned in M order and
+    the first bound >= M decides; ``out_dtype`` ``any`` rows are the AITER defaults, ``bf16`` / ``fp16`` rows
+    override them within their measured range (``min_m`` narrows a row's range from below). Columns: ``M, N, K,
+    out_dtype``, ``kernel`` the variant (``aiter``, ``staged_ab``, ``decode``, ``decode_fq``, ``decode_splitk``,
+    ``4wave``, ``4wave_nt``), then the ``_Config`` fields (``tile_m, tile_n, tile_k, waves_m, waves_n,
+    waves_per_eu, xcd_swizzle, split_k, la_w, la_a, min_m, w_cm``)."""
     configs: dict[tuple[int, int, str], list[tuple[int, _Config]]] = {}
-    # the CSV text of the tuned table (mxfp8_gemm_tuned.py)
-    for row in csv.DictReader(io.StringIO(TUNED_CSV)):
+    for row in csv.DictReader(io.StringIO(text)):
         shape = (int(row["N"]), int(row["K"]), row["out_dtype"])
         config = _Config(
             tile_m=int(row["tile_m"]),
@@ -143,7 +178,7 @@ def _load_tuned_configs() -> dict[
         if config.kernel not in (
             "aiter",
             _STAGED_KERNEL,
-            *_DECODE_KERNELS,
+            *_SHUFFLED_A_KERNELS,
             *_FOURWAVE_KERNELS,
         ):
             raise ValueError(f"Unknown MXFP8 GEMM kernel: {config.kernel}")
@@ -188,6 +223,8 @@ def _load_tuned_configs() -> dict[
                 )
             ):
                 raise ValueError(f"Unsupported decode MXFP8 GEMM config: {row}")
+        if config.kernel == _DECODE_SPLITK_KERNEL and not _splitk_config_ok(*shape[:2], config):
+            raise ValueError(f"Unsupported split-K decode MXFP8 GEMM config: {row}")
         if config.kernel == _STAGED_KERNEL:
             tiles = (64, 128) if config.waves_n == 2 else (128, 256)
             if not (
@@ -210,13 +247,79 @@ def _load_tuned_configs() -> dict[
     }
 
 
+def _splitk_config_ok(n: int, k: int, config: _Config) -> bool:
+    steps = k // 128
+    return (
+        config.tile_m % 16 == 0
+        and config.waves_m >= 1
+        and config.tile_n % (16 * config.waves_m) == 0
+        and n % config.tile_n == 0
+        and 1 <= config.waves_n
+        and config.waves_m + config.waves_n <= 8
+        and 2 <= config.split_k <= 8
+        and k % 256 == 0
+        and steps % config.split_k == 0
+        and (steps // config.split_k) % 2 == 0
+        and config.la_w >= 1
+        and config.la_a >= 0
+    )
+
+
+def splitk_rows(
+    first: int, last: int, m_blocks: int, tile_n: int, waves: int, loaders: int, split_k: int, lookahead: int,
+    ring: int = 0,
+) -> tuple[tuple[int, _Config], ...]:
+    """(last row, config) of the split-K decode rows over ``first``-``last`` rows: ``m_blocks`` m-blocks of
+    16 * ceil(ceil(M / m_blocks) / 16) rows, one config per m-block size."""
+    rows = []
+    m = first
+    while m <= last:
+        tile_m = 16 * -(-(-(-m // m_blocks)) // 16)
+        top = min(last, tile_m * m_blocks)
+        rows.append((top, _Config(tile_m, tile_n, 128, 0, 0, split_k, _DECODE_SPLITK_KERNEL, waves, loaders,
+                                  lookahead, ring)))
+        m = top + 1
+    return tuple(rows)
+
+
 def tuned_shapes(out_dtype: torch.dtype = torch.bfloat16) -> frozenset[tuple[int, int]]:
-    """The (N, K) weight shapes whose table has rows tuned for ``out_dtype`` (bf16 or
-    fp16 output). A caller that switches its linears to this entry by shape switches
-    these: any other shape runs only the AITER default rows or the generic fallback
-    tiles, which were never measured against other kernels."""
+    """The (N, K) weight shapes whose folder has rows tuned for ``out_dtype`` (bf16 or fp16
+    output). A caller that switches its linears to this entry by shape switches these: any
+    other shape runs only the AITER default rows or the generic fallback tiles, which were
+    never measured against other kernels."""
     name = {torch.bfloat16: "bf16", torch.float16: "fp16"}[out_dtype]
     return frozenset((n, k) for n, k, d in _load_tuned_configs() if d == name)
+
+
+def select_from_rows(
+    rows: dict,
+    m: int,
+    n: int,
+    k: int,
+    out_dtype: torch.dtype = torch.bfloat16,
+    allow_decode: bool = True,
+) -> _Config | None:
+    """The row of ``rows`` (``parse_rows``) for an M x N x K call: the dtype's row within its
+    measured range, else the ``any`` (AITER default) row, the last one past their bounds;
+    None when ``rows`` has neither for (N, K)."""
+    dtype_name = "bf16" if out_dtype == torch.bfloat16 else "fp16"
+    tuned_configs = rows.get((n, k, dtype_name))
+    if tuned_configs is not None and m <= tuned_configs[-1][0]:
+        for tuned_m, config in tuned_configs:
+            if m <= tuned_m:
+                if m >= config.min_m and (
+                    allow_decode or config.kernel not in _SHUFFLED_A_KERNELS
+                ):
+                    return config
+                break
+    # Preserve the AITER defaults outside the dtype-specific measured ranges.
+    tuned_configs = rows.get((n, k, "any"))
+    if tuned_configs is not None:
+        for tuned_m, config in tuned_configs:
+            if m <= tuned_m:
+                return config
+        return tuned_configs[-1][1]
+    return None
 
 
 def _select_config(
@@ -237,24 +340,6 @@ def _select_config(
         config = host.select(m, out_dtype, allow_decode)
         if config is not None:
             return config
-    configs = _load_tuned_configs()
-    dtype_name = "bf16" if out_dtype == torch.bfloat16 else "fp16"
-    tuned_configs = configs.get((n, k, dtype_name))
-    if tuned_configs is not None and m <= tuned_configs[-1][0]:
-        for tuned_m, config in tuned_configs:
-            if m <= tuned_m:
-                if m >= config.min_m and (
-                    allow_decode or config.kernel not in _SHUFFLED_A_KERNELS
-                ):
-                    return config
-                break
-    # Preserve the AITER defaults outside the dtype-specific measured ranges.
-    tuned_configs = configs.get((n, k, "any"))
-    if tuned_configs is not None:
-        for tuned_m, config in tuned_configs:
-            if m <= tuned_m:
-                return config
-        return tuned_configs[-1][1]
 
     # Fallback configs for untuned (N, K) shapes.
     if m <= 16:
@@ -332,8 +417,8 @@ _PLAIN_GRID_MAX = 1 << 20
 
 
 # Every 4-wave launch asks vLLM's ``vllm.v1.worker.ubatching.dbo_enabled()`` (true
-# while a step runs as two microbatches; the TP4 deployments split prefill steps of >= 8192
-# tokens, so a microbatch has >= 4096 rows). A server passes that query with
+# while a step runs as two microbatches, from the server's DBO prefill threshold on, e.g. 8192
+# tokens: microbatches of >= 4096 rows). A server passes that query with
 # ``set_dbo_query``; without one, ``DBO`` answers (tests and benchmarks set it).
 DBO = False
 _dbo_query = None
@@ -446,6 +531,77 @@ def _reduce_launcher(_constexprs):
     exe = flyc.jit(launch_splitk_reduce.func)
     exe.compile_hints = _PRELOAD_HINTS
     return exe
+
+
+@functools.cache
+def _splitk_launcher(n, k, config: _Config):
+    from .mxfp8_gemm_decode_splitk import compile_mxfp8_gemm_decode_splitk
+
+    return compile_mxfp8_gemm_decode_splitk(
+        N=n, K=k, RT=config.tile_m // 16, NIW=config.tile_n // (16 * config.waves_m), NWM=config.waves_m,
+        NL=config.waves_n, KS=config.split_k, LW=config.la_w, R=config.la_a,
+    )
+
+
+# The split-K decode rows' epoch counters: one zeroed set per (device, stream), the stream a call is
+# launched or captured on. Calls on one stream never overlap, so they share a set; a graph uses its
+# capture stream's set and must not replay concurrently with another graph captured on that stream
+# (vLLM captures and replays on its one compute stream).
+_SPLITK_COUNTER_SETS = 64
+_SPLITK_COUNTER_LOCK = threading.Lock()
+_SPLITK_POOL: dict = {}
+_SPLITK_COUNTERS: dict = {}
+
+
+def _splitk_counters(device: torch.device, dwords: int) -> torch.Tensor:
+    from .mxfp8_gemm_decode_splitk import CNT_STRIDE, GRID_MAX
+
+    size = GRID_MAX // 2 * 8 * CNT_STRIDE  # >= 2 splits, <= 8 waves per workgroup
+    if dwords > size:
+        raise ValueError(f"split-K decode row needs {dwords} counter dwords (> {size})")
+    key = (device, torch.cuda.current_stream(device).cuda_stream)
+    cnt = _SPLITK_COUNTERS.get(key)
+    if cnt is not None:
+        return cnt
+    with _SPLITK_COUNTER_LOCK:
+        cnt = _SPLITK_COUNTERS.get(key)
+        if cnt is not None:
+            return cnt
+        pool = _SPLITK_POOL.get(device)
+        if pool is None:
+            if torch.cuda.is_current_stream_capturing():
+                raise RuntimeError("split-K decode MXFP8 GEMM: first call inside CUDA graph capture; run it once "
+                                   "eagerly on the device first (warmup_mxfp8_gemm_weight does)")
+            pool = torch.zeros(_SPLITK_COUNTER_SETS * size, dtype=torch.int32, device=device)
+            torch.cuda.current_stream(device).synchronize()
+            _SPLITK_POOL[device] = pool
+        used = sum(1 for d, _ in _SPLITK_COUNTERS if d == device)
+        if used >= _SPLITK_COUNTER_SETS:
+            raise RuntimeError(f"split-K decode MXFP8 GEMM: more than {_SPLITK_COUNTER_SETS} streams on {device}")
+        cnt = _SPLITK_COUNTERS[key] = pool[used * size:(used + 1) * size]
+        return cnt
+
+
+def _launch_splitk(config, activation, activation_scale, weight, weight_scale, out):
+    """One launch of the split-K decode kernel over the whole [M, N] bf16 output (its own reduce)."""
+    from amd_kernels.common.tensor_shim import _run_compiled
+
+    from .mxfp8_gemm_decode_splitk import GRID_MAX, geometry
+
+    m, n = out.shape
+    k = weight.shape[1]
+    grid, n_mb, counters, slab_bytes = geometry(
+        n, m, config.tile_m // 16, config.tile_n // (16 * config.waves_m), config.waves_m, config.split_k
+    )
+    if grid > GRID_MAX:
+        raise ValueError(f"split-K decode row {config} at M {m} needs {grid} > {GRID_MAX} workgroups")
+    u8 = lambda t: t.view(torch.uint8).view(-1)  # noqa: E731
+    slab = torch.empty(slab_bytes, dtype=torch.uint8, device=out.device)
+    _run_compiled(
+        _splitk_launcher(n, k, config), u8(activation), u8(weight), u8(out), u8(activation_scale),
+        u8(weight_scale), slab, u8(_splitk_counters(out.device, counters)), m,
+        activation_scale.numel() * activation_scale.element_size(), n_mb, grid, torch.cuda.current_stream(),
+    )  # fmt: skip
 
 
 class SkPartials:
@@ -568,10 +724,14 @@ def _preshuffle_activation_scale(scale: torch.Tensor) -> torch.Tensor:
     return shuffle_scale_a16w4(scale, 1, False)
 
 
+# the o_proj (N, K) whose callers may pass their own output arena (``out=``)
+_OPROJ_OUT_SHAPES = frozenset({(6144, 2048), (6144, 4096)})
+
+
 def _validate_oproj_output(out, activation, weight, weight_scale, dtype, m, n, k, activation_scale=None):
     """Validate a caller-owned contiguous BF16 o_proj arena before any kernel writes it."""
-    if (n, k) != (6144, 2048) or dtype != torch.bfloat16:
-        raise ValueError("out= supports BF16 o_proj N6144 K2048")
+    if (n, k) not in _OPROJ_OUT_SHAPES or dtype != torch.bfloat16:
+        raise ValueError("out= supports BF16 o_proj N6144 K2048 / K4096")
     if out.shape != (m, n) or out.dtype != dtype or out.device != activation.device or not out.is_contiguous():
         raise ValueError("out= must be contiguous [M, 6144] BF16 on the activation device")
     inputs = (activation, weight, weight_scale) + (() if activation_scale is None else (activation_scale,))
@@ -592,7 +752,7 @@ def mxfp8_linear(
     activation quantizer is the one the table's kernel wants (the decode kernel reads
     the codes in the weight's (16, 16) layout, the others row-major). ``config``: run
     this configuration instead of the table's (tests, benchmarks). ``out`` may supply a
-    contiguous BF16 o_proj arena (N6144 K2048);
+    contiguous BF16 o_proj arena (N6144, K 2048 or 4096);
     the returned tensor is that same object. No output copy is made.
     """
     m, k = x.shape
@@ -620,12 +780,15 @@ def mxfp8_linear(
             True,
         )
         return out
-    if config.kernel == _DECODE_KERNEL:
+    if config.kernel in (_DECODE_KERNEL, _DECODE_SPLITK_KERNEL):
         if out is not None:
             _validate_oproj_output(out, x, weight, weight_scale, out_dtype, m, n, k)
         activation, activation_scale = mxfp8_e4m3_quantize_shuffled(x, config.tile_m)
         out = torch.empty((m, n), dtype=out_dtype, device=x.device) if out is None else out
-        _launch_decode(config, activation, activation_scale, weight, weight_scale, out)
+        if config.kernel == _DECODE_SPLITK_KERNEL:
+            _launch_splitk(config, activation, activation_scale, weight, weight_scale, out)
+        else:
+            _launch_decode(config, activation, activation_scale, weight, weight_scale, out)
         return out
     activation, activation_scale = mxfp8_e4m3_quantize_aiter(x)
     return mxfp8_gemm(
@@ -648,8 +811,8 @@ def mxfp8_gemm(
     """``A @ W^T`` for a row-major MXFP8 activation (codes [M, K], scales [M, K/32] or
     preshuffled) and a preshuffled weight. Row-major codes never take a decode row (those
     read the (16, 16) layout: ``mxfp8_gemm_shuffled``, or ``mxfp8_linear`` from bf16).
-    ``out`` may supply a contiguous BF16 o_proj arena (N6144 K2048); the returned tensor is
-    that same object. ``config``: run this configuration instead of the table's (tests,
+    ``out`` may supply a contiguous BF16 o_proj arena (N6144, K 2048 or 4096); the returned
+    tensor is that same object. ``config``: run this configuration instead of the table's (tests,
     benchmarks)."""
     m, k = activation.shape
     n = weight.shape[0]
@@ -749,7 +912,8 @@ def mxfp8_gemm_shuffled(
     ([ceil(m / tile) * tile, K], the tile from ``prequant_code_tile_rows``) and scales in
     AITER's shuffled layout ([ceil(rows / 32) * 32, K / 32]). With ``defer_reduce``,
     TP4 QKV also tunes the split for a fused norm/RoPE/insert consumer: return
-    ``SkPartials`` where measured faster, keeping the producer's code layout.
+    ``SkPartials`` where measured faster, keeping the producer's code layout; a split-K
+    decode row sums its splits in the kernel and returns bf16 either way.
     An explicit ``config`` (tests/benchmarks) overrides both tables."""
     n, k = weight.shape[0], activation.shape[1]
     held = activation.shape[0]
@@ -776,6 +940,9 @@ def mxfp8_gemm_shuffled(
             f"{tuple(activation_scale.shape)} do not match M {m}, tile {config.tile_m}"
         )
     out = torch.empty((m, n), dtype=out_dtype, device=activation.device)
+    if config.kernel == _DECODE_SPLITK_KERNEL:
+        _launch_splitk(config, activation, activation_scale, weight, weight_scale, out)
+        return out
     result = _launch_decode(
         config,
         activation,

@@ -17,8 +17,9 @@ from amd_kernels.attention.nvfp4_sparse_prefill_gqa16_d128_p128_top16 import ref
 
 BLOCK, HEAD_DIM, GROUP, TOPK = ref.BLK, ref.D, ref.HG, ref.TOPK
 SM_SCALE = HEAD_DIM**-0.5
-# served KV heads per GPU: TP4 (16 query heads)
+# served KV heads per GPU: TP4 (16 query heads), TP2 (32 query heads)
 TP4_HKV = 1
+TP2_HKV = 2
 
 
 def require_gfx950():

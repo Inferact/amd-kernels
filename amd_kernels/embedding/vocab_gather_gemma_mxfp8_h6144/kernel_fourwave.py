@@ -35,7 +35,7 @@ def _block_sum(w):
     return (((w[0]+w[8])+w[4])+((w[2]+w[10])+w[6])) + (((w[1]+w[9])+w[5])+((w[3]+w[11])+w[7]))
 
 
-def _lookup_source(arg_ids,arg_peers,row,rows,shard_vocab,id_bits):
+def _lookup_source(arg_ids,arg_peers,row,rows,shard_vocab,id_bits,ranks):
     ir=buffer_ops.create_buffer_resource_from_addr(arg_ids,num_records_bytes=rows*(id_bits//8))
     if id_bits==32:
         token=fx.Int64(buffer_ops.buffer_load(ir,row,vec_width=1,dtype=fx.Int32,is_scalar=True))
@@ -43,11 +43,11 @@ def _lookup_source(arg_ids,arg_peers,row,rows,shard_vocab,id_bits):
         lo=fx.Int64(buffer_ops.buffer_load(ir,row*2,vec_width=1,dtype=fx.Int32,is_scalar=True))
         hi=fx.Int64(buffer_ops.buffer_load(ir,row*2+1,vec_width=1,dtype=fx.Int32,is_scalar=True))
         token=(lo&fx.Int64(0xffffffff))|(hi<<32)
-    valid=(token>=0)&(token<fx.Int64(shard_vocab*4))
+    valid=(token>=0)&(token<fx.Int64(shard_vocab*ranks))
     safe=valid.select(token,fx.Int64(0))
     owner=(safe//fx.Int64(shard_vocab)).to(fx.Int32)
     local=safe%fx.Int64(shard_vocab)
-    pr=buffer_ops.create_buffer_resource_from_addr(arg_peers,num_records_bytes=32)
+    pr=buffer_ops.create_buffer_resource_from_addr(arg_peers,num_records_bytes=8*ranks)
     # buffer_ops' scalar load returns raw i32 dwords regardless of dtype.
     lo=fx.Int64(buffer_ops.buffer_load(pr,owner*2,vec_width=1,dtype=fx.Int32,is_scalar=True))
     hi=fx.Int64(buffer_ops.buffer_load(pr,owner*2+1,vec_width=1,dtype=fx.Int32,is_scalar=True))
@@ -65,8 +65,10 @@ def _load_clean(rsrc,off,valid):
     return Vec.from_elements(clean,fx.Int32)
 
 
-def compile_vocab_gather_gemma_mxfp8_fourwave(shuffled=False, id_bits=32):
-    name = f"vocab_gather_gemma_mxfp8_fourwave_{'tiled' if shuffled else 'rowmajor'}_h6144" + f"_i{id_bits}"
+def compile_vocab_gather_gemma_mxfp8_fourwave(shuffled=False, id_bits=32, ranks=4):
+    assert ranks in (2, 4)
+    name = f"vocab_gather_gemma_mxfp8_fourwave_{'tiled' if shuffled else 'rowmajor'}_h6144" + f"_i{id_bits}" + (
+        "" if ranks == 4 else f"_ranks{ranks}")
 
     @fx.struct
     class Shared:
@@ -93,7 +95,7 @@ def compile_vocab_gather_gemma_mxfp8_fourwave(shuffled=False, id_bits=32):
             smem = fx.SharedAllocator().allocate(Shared).peek()
             part = smem.part.ptr
             nb = H * 2
-            xr,valid=_lookup_source(arg_ids,arg_peers,row,i32_m,shard_vocab,id_bits)
+            xr,valid=_lookup_source(arg_ids,arg_peers,row,i32_m,shard_vocab,id_bits,ranks)
             wr = buffer_ops.create_buffer_resource_from_addr(
                 arg_w, num_records_bytes=nb
             )

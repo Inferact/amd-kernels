@@ -33,7 +33,7 @@ if __name__=="__main__":
     warmup_bf16_gemm_packed_rows(dev)
     weight=torch.randn(N,K,dtype=torch.bfloat16,device=dev)
     weights=[weight,weight.clone(),weight.clone()]
-    for n in (3,4,8,16,32,64):
+    for n in (3,4,5,8,16,32,64,96,128):
         idx=torch.arange(n,device=dev)
         ps=[torch.empty(padded_rows(n),K,dtype=torch.bfloat16,device=dev) for _ in range(100)]
         for p in ps:pack_bf16_rows(torch.randn(n,K,dtype=torch.bfloat16,device=dev),idx,p)

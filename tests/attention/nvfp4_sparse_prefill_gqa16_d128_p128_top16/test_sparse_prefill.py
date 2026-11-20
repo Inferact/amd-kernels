@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the amd-kernels project
 """The FlyDSL NVFP4 sparse prefills (bf16 and fp16 compute; fp8 below) against the
-torch contract in ``reference.py``, on the served shape: Hkv = 1 (TP4, 16 query heads),
-1 to 65536 prefill tokens."""
+torch contract in ``reference.py``, on the served shapes: Hkv = 1 (TP4, 16 query heads) and Hkv = 2 (TP2, 32 query
+heads), 1 to 65536 prefill tokens."""
 
 import dataclasses
 
@@ -16,13 +16,14 @@ from .cases import (
     BLOCK,
     HEAD_DIM,
     TOPK,
+    TP2_HKV,
     TP4_HKV,
     make_case,
     require_gfx950,
 )
 
 VARIANTS = ["bf16", "fp16", "fp8"]  # fp16: the default compute dtype
-HKVS = [TP4_HKV]
+HKVS = [TP4_HKV, TP2_HKV]
 FILL = 0xA5
 
 
@@ -156,9 +157,11 @@ def test_one_and_two_round_combine_consistent(variant, hkv):
     case = make_case([n], [n], hkv, seed=5, picks="shared")
     full = run(case, variant)
     check_reference(case, full, variant)
-    # BF16 / FP16 at one KV head: TQ1 (256), TQ2 (256, and 1536 = its largest), TQ4 (2048)
-    small = variant in ("bf16", "fp16") and hkv == TP4_HKV
-    cuts = [0, 256, 512, 2048, n] if small else [0, edge, 3 * edge, n]
+    # BF16 / FP16 at one KV head: TQ1 (256), TQ2 (256, and 1536 = its largest), TQ4 (2048); at two: TQ1 (128),
+    # shared-Q TQ2 (256, 512), TQ3 (384, 768)
+    small = variant in ("bf16", "fp16")
+    small_cuts = [0, 256, 512, 2048, n] if hkv == TP4_HKV else [0, 128, 384, 768, 1280, n]
+    cuts = small_cuts if small else [0, edge, 3 * edge, n]
     parts = torch.cat([run(case_slice(case, a, b), variant) for a, b in zip(cuts, cuts[1:])])
     if variant == "fp8" or small:
         # Small query tiles walk their local pages; the four-query layout
@@ -235,10 +238,10 @@ def test_pack_epilogue_bytes(variant, hkv, q_lens):
     assert bool((pack[n_tok:] == FILL).all())
 
 
-@pytest.mark.parametrize("hkv,n_tok", [(TP4_HKV, 65536)], ids=["tp4-64k"])
+@pytest.mark.parametrize("hkv,n_tok", [(TP4_HKV, 65536), (TP2_HKV, 65536)], ids=["tp4-64k", "tp2-64k"])
 @pytest.mark.parametrize("variant", VARIANTS)
 def test_largest_step(variant, hkv, n_tok):
-    """The largest served step (max-num-batched-tokens 65536 at TP4): the reference on
+    """The largest served step (max-num-batched-tokens 65536 at TP4 and TP2): the reference on
     sampled rows and the quant epilogue's bytes."""
     require_gfx950()
     case = make_case([n_tok], [n_tok + 4096], hkv, seed=0, picks="shared")
@@ -295,7 +298,8 @@ def test_graph_replay(variant, hkv, mode):
 # --- determinism next to other kernels -----------------------------------------------
 
 
-@pytest.mark.parametrize("hkv,n_tok", [(TP4_HKV, 1024), (TP4_HKV, 4096)])
+@pytest.mark.parametrize("hkv,n_tok", [(TP4_HKV, 1024), (TP4_HKV, 4096), (TP2_HKV, 384), (TP2_HKV, 512),
+                                       (TP2_HKV, 2048)])
 @pytest.mark.parametrize("variant", VARIANTS)
 def test_bitwise_next_to_mfma_waves(variant, hkv, n_tok):
     """With another kernel's MFMA waves on every CU the output equals an undisturbed

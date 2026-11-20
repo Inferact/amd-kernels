@@ -27,13 +27,16 @@ from .kernel import (
 )
 
 
-def compile_nvfp4_f16mfma_gqa16_d128_p128_top16_q8_rowxcd_select(splits: int, quant: bool):
+def compile_nvfp4_f16mfma_gqa16_d128_p128_top16_q8_rowxcd_select(splits: int, quant: bool, hkv: int = 1):
     """The launcher (splits 4)."""
+    assert hkv in (1, 2), hkv
+    HKV = hkv
     assert splits == 4
     SPLITS, TOPK, XCDS = splits, 16, 8
     PART_SCOPE = 0
     name = (
         f"nvfp4_f16mfma_sparse_gqa16_d128_p128_top{TOPK}_q8_rowxcd_s{SPLITS}_xcd{XCDS}"
+        + ("_kv2" if HKV == 2 else "")
         + ("_mxfp8" if quant else "")
         + "_select16"
     )
@@ -114,6 +117,12 @@ def compile_nvfp4_f16mfma_gqa16_d128_p128_top16_q8_rowxcd_select(splits: int, qu
             sb.to(fx.Int32).to(fx.Int8), qsr, s_off, mask=row < i32_rows
         )
 
+    def score_row(arg_score, i64_s_row, rowc, kvh):
+        """The address of row ``rowc``'s index scores of index head ``kvh``."""
+        if HKV == 1:
+            return arg_score + rowc.to(fx.Int64) * i64_s_row * 4
+        return arg_score + (rowc.to(fx.Int64) * (i64_s_row & 0xFFFFFFFF) + kvh.to(fx.Int64) * (i64_s_row >> 32)) * 4
+
     # the arguments of the first (dependent) loads lead: the first 56 bytes arrive preloaded in SGPRs
     @flyc.kernel(name=name, known_block_size=[64 * NW, 1, 1])
     def kernel(
@@ -143,13 +152,13 @@ def compile_nvfp4_f16mfma_gqa16_d128_p128_top16_q8_rowxcd_select(splits: int, qu
         i32_heavy: fx.Int32,  # (kernel.py's tail-grid arguments, unused)
         i32_tpx: fx.Int32,
         arg_score: fx.Int64,  # [Hkv, >= rows, >= width] fp32 index scores
-        i64_s_row: fx.Int64,  # their row stride (elements)
+        i64_s_row: fx.Int64,  # their row stride (elements); at 2 KV heads | the head stride << 32
         i32_width: fx.Int32,  # score_width(max_seq_len) of the indexer
     ):
         smem = fx.SharedAllocator().allocate(Shared).peek()
-        # the served shape: 16 query heads, 1 KV head (8 rows per request below)
-        i32_H = fx.Int32(16)
-        i32_hkv = fx.Int32(1)
+        # the served shape: 16 query heads per KV head, HKV KV heads (8 rows per request below)
+        i32_H = fx.Int32(16 * HKV)
+        i32_hkv = fx.Int32(HKV)
         tx = fx.thread_idx.x
         bx, kvh = fx.block_idx.x, fx.block_idx.y
         lane = tx % 64
@@ -179,11 +188,11 @@ def compile_nvfp4_f16mfma_gqa16_d128_p128_top16_q8_rowxcd_select(splits: int, qu
 
         # lane = top-k slot: its logical block and page (-1: none)
         slot_ok = lane < TOPK
-        # the row's top-16 from its index scores (one KV head = one index head), stored as the selector kernel stores
+        # the row's top-16 from its index scores (index head = KV head), stored as the selector kernel stores
         # it; padding rows redo row 0's
         id_row = arg_topk + (kvh * i32_topk_hs + rowc * TOPK).to(fx.Int64) * 4
         fast = row_top16_prologue_ids(
-            tx, arg_score + rowc.to(fx.Int64) * i64_s_row * 4, i32_width, arg_seq,
+            tx, score_row(arg_score, i64_s_row, rowc, kvh), i32_width, arg_seq,
             rowc, fx.Int32(8), smem.cand.ptr, smem.sel.ptr, smem.tmp.ptr, id_row,
         )
         blk_lds = fx.Int32(smem.tmp.ptr[lane % TOPK])

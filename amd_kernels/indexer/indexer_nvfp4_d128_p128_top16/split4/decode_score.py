@@ -14,7 +14,8 @@ buffer, then a per-request flag; a wave issues its first page's loads before it 
 Work: the rank's runs (its 16 blocks of a chunk) of every request, prefix-summed in LDS; workgroup g takes runs g,
 g + grid, ..., wave w quarter w (4 blocks) of each, the next page loading tile by tile under the current one. A call
 of at most UNIT_MAX / 4 runs (from the device-side lengths) splits each run into four 4-block units instead, wave w
-its block w. A wave keeps its request's Q columns in registers and 64 pages' table entries in one VGPR (readlane per
+its block w, and up to HALF_MAX / 2 runs into two 8-block halves, wave w its blocks 2 w and 2 w + 1 (32 B peer stores).
+A wave keeps its request's Q columns in registers and 64 pages' table entries in one VGPR (readlane per
 page). The quarters meet in LDS and one wave stores the run: 64 B per (head, row), sc0 sc1 (16 B pieces cost more
 over xGMI).
 
@@ -99,7 +100,10 @@ CHUNK = WORLD * CP_CH  # blocks per chunk: one run of every rank
 SC1 = 0x10  # load cache policy: coherent across the XCDs' L2s
 # units of 4 blocks (one page per wave) up to this many: more workgroups shorten a wave's page chain; above it their
 # 16 B peer stores lose (M 8 at 32K 17.2 -> 13.3 us; 512 units at 512K +6.5%)
-UNIT_MAX = 256
+UNIT_MAX = 208
+# half runs (8 blocks: two pages per wave, 32 B peer stores) above UNIT_MAX up to this many: twice the busy
+# workgroups of whole runs, which win again from about 200 runs per rank
+HALF_MAX = 400
 # the fused top-k (one waiting workgroup per row, the standalone four-wave selector's body) up to this many rows: the
 # waiting workgroups slow the call as their count grows (128K M 40-128 -0.7..-1.0 us vs two launches)
 TK_MAX_ROWS = 128
@@ -300,6 +304,8 @@ def compile_score_push(ql: int, topk: bool, small: bool):
         # contiguous split spreads them and stacks some CUs: 16 requests 15.0 -> 18.5 us)
         total = _uni(incl_l[NR - 1])
         unit = total * NW <= UNIT_MAX
+        # half runs (2 pages per wave) up to HALF_MAX of them: between the unit split and whole runs
+        half = total * 2 <= HALF_MAX
 
         lut8 = fx.logical_divide(
             fx.make_view(
@@ -324,6 +330,14 @@ def compile_score_push(ql: int, topk: bool, small: bool):
             fx.make_layout(1, 1),
         )
         atom4 = fx.make_copy_atom(fx.UniversalCopy32b(), fx.Int32)
+        stage8 = fx.logical_divide(
+            fx.make_view(
+                fx.recast_iter(fx.Int32, smem.stage.ptr),
+                fx.make_layout(2 * NG * 16 * NW * QD, 1),
+            ),
+            fx.make_layout(2, 1),
+        )
+        atom8 = fx.make_copy_atom(fx.UniversalCopy64b(), fx.Int32)
 
         def lut_load(sbyte):
             r = fx.make_rmem_tensor(fx.make_layout(2, 1), fx.Int32)
@@ -510,11 +524,15 @@ def compile_score_push(ql: int, topk: bool, small: bool):
                 )
             rs = rs + i32_nwg
 
-        def scan(UNIT):
-            """The pages of this workgroup's items: units (``UNIT``, a quarter of
-            a run, wave w its block w) or runs (wave w its quarter w)."""
-            qdv = 1 if UNIT else QD  # pages per item and wave
-            items = total * NW if UNIT else total
+        def scan(MODE):
+            """The pages of this workgroup's items: units (``MODE`` 2: a quarter of
+            a run, wave w its block w), halves (``MODE`` 1: half a run, wave w its
+            blocks 2 w, 2 w + 1) or runs (``MODE`` 0: wave w its quarter w)."""
+            UNIT = MODE == 2
+            HALF = MODE == 1
+            qdv = 1 if UNIT else (2 if HALF else QD)  # pages per item and wave
+            qsh = qdv.bit_length() - 1
+            items = total * (QD // qdv)
             nitems = (pid < items).select((items - pid + i32_nwg - 1) // i32_nwg, 0)
             nslots = nitems * qdv  # pages of this wave
             w0 = fx.Int32(0)
@@ -523,8 +541,8 @@ def compile_score_push(ql: int, topk: bool, small: bool):
                 # grid's: a run's block 4 w + s % 4, or unit u's block 4 u + w (run
                 # k = item / 4), of request rj (binary search in the prefix)
                 s = w0 + lane
-                it = pid + (s if UNIT else s >> 2) * i32_nwg
-                k = (it >> 2) if UNIT else it
+                it = pid + (s >> qsh) * i32_nwg
+                k = it >> (2 - qsh)
                 rj = fx.Int32(0)
                 for bs in range_constexpr(NR_LOG):
                     step = NR >> (bs + 1)
@@ -534,7 +552,12 @@ def compile_score_push(ql: int, topk: bool, small: bool):
                 excl = (rj > 0).select(fx.Int32(incl_l[_max(rj - 1, 0)]), fx.Int32(0))
                 seqj = fx.Int32(seq_l[rj])
                 nblkj = (seqj + (BLK - 1)) // BLK
-                in_run = ((it & 3) * NW + wave) if UNIT else (wave * QD + (s & 3))
+                if const_expr(UNIT):
+                    in_run = (it & 3) * NW + wave
+                elif const_expr(HALF):
+                    in_run = (it & 1) * (2 * NW) + wave * 2 + (s & 1)
+                else:
+                    in_run = wave * QD + (s & 3)
                 bj = (k - excl) * CHUNK + in_run * WORLD + i32_me
                 frow = seqj - (QL - 1)
                 rbf = ((frow < 0).select(fx.Int32(0), frow) + (BLK - 1)) // BLK
@@ -580,12 +603,12 @@ def compile_score_push(ql: int, topk: bool, small: bool):
                 # a unit is one slot, so its lane polls all four sources
                 want = lane < n
                 word = mine + fx.Int64(
-                    (SC_IQ + (0 if UNIT else lane % WORLD) * SC_MAX_REQS + rj) * 4
+                    (SC_IQ + (lane % WORLD if MODE == 0 else 0) * SC_MAX_REQS + rj) * 4
                 )
 
                 def poll():
                     lo = _flag_read(word)
-                    if const_expr(UNIT):
+                    if const_expr(MODE != 0):
                         for p in range_constexpr(1, WORLD):
                             lo = _min(
                                 lo, _flag_read(word + fx.Int64(p * SC_MAX_REQS * 4))
@@ -657,7 +680,7 @@ def compile_score_push(ql: int, topk: bool, small: bool):
                     c5, s5 = res[2][5]
                     c6, s6 = res[2][6]
                     c7, s7 = res[2][7]
-                    e = fx.Int32(0) if UNIT else (w0 + j) & 3
+                    e = fx.Int32(0) if UNIT else (w0 + j) & (qdv - 1)
                     ov0 = row_value(res[0], seq, st_qoff, b)
                     v00 = (e == 0).select(ov0, v00)
                     v01 = (e == 1).select(ov0, v01)
@@ -669,13 +692,13 @@ def compile_score_push(ql: int, topk: bool, small: bool):
                         v11 = (e == 1).select(ov1, v11)
                         v12 = (e == 2).select(ov1, v12)
                         v13 = (e == 3).select(ov1, v13)
-                    done = (j >= 0) if UNIT else (e == QD - 1)
+                    done = (j >= 0) if UNIT else (e == qdv - 1)
                     if done:
                         # the item's pages meet in LDS ([slot][group][col][wave]: a
                         # unit's 4 B or a run quarter's 16 B per wave); wave m % NW
                         # stores 16 B per lane: a unit's 4 blocks (lanes kl 0) or
                         # quarter kl of the run
-                        m = (w0 + j) if UNIT else (w0 + j) >> 2
+                        m = (w0 + j) >> qsh
                         slot = m % 2
                         vsets = [[v00, v01, v02, v03], [v10, v11, v12, v13]]
                         if kl == 0:
@@ -685,6 +708,14 @@ def compile_score_push(ql: int, topk: bool, small: bool):
                                     val = fx.make_rmem_tensor(fx.make_layout(1, 1), fx.Int32)
                                     val.store(Vec.from_elements([_bits(vsets[g][0])], fx.Int32))
                                     fx.copy(atom4, val, fx.slice(stage4, (None, base)))
+                                elif const_expr(HALF):
+                                    val = fx.make_rmem_tensor(fx.make_layout(2, 1), fx.Int32)
+                                    val.store(
+                                        Vec.from_elements(
+                                            [_bits(vsets[g][0]), _bits(vsets[g][1])], fx.Int32
+                                        )
+                                    )
+                                    fx.copy(atom8, val, fx.slice(stage8, (None, base)))
                                 else:
                                     val = fx.make_rmem_tensor(fx.make_layout(4, 1), fx.Int32)
                                     val.store(
@@ -693,20 +724,31 @@ def compile_score_push(ql: int, topk: bool, small: bool):
                                         )
                                     )
                                     fx.copy(atom16, val, fx.slice(stage16, (None, base)))
-                        if const_expr(UNIT):
+                        if const_expr(MODE != 0):
                             fx.rocdl.s_waitcnt(lgkmcnt=0)
                         fx.gpu.barrier()
                         if wave == m % NW:
                             # the 16 B's 4-block group within this rank's 16 of
                             # the chunk
-                            qsel = (b % CHUNK) // (NW * WORLD) if UNIT else kl
+                            if const_expr(UNIT):
+                                qsel = (b % CHUNK) // (NW * WORLD)
+                            elif const_expr(HALF):
+                                qsel = ((b % CHUNK) // (2 * NW * WORLD)) * 2 + (kl & 1)
+                            else:
+                                qsel = kl
                             for g in range_constexpr(NG):
                                 base = (slot * NG + g) * 16 + col
                                 got = fx.make_rmem_tensor(fx.make_layout(4, 1), fx.Int32)
                                 fx.copy(
                                     atom16,
                                     fx.slice(
-                                        stage16, (None, base if UNIT else base * NW + kl)
+                                        stage16,
+                                        (
+                                            None,
+                                            base
+                                            if UNIT
+                                            else (base * 2 + (kl & 1) if HALF else base * NW + kl),
+                                        ),
                                     ),
                                     got,
                                 )
@@ -717,9 +759,12 @@ def compile_score_push(ql: int, topk: bool, small: bool):
                                     + qsel * 4
                                 )
                                 for h in range_constexpr(HEADS):
-                                    ok_h = (
-                                        (st_head == h) & (kl == 0) if UNIT else st_head == h
-                                    )
+                                    if const_expr(UNIT):
+                                        ok_h = (st_head == h) & (kl == 0)
+                                    elif const_expr(HALF):
+                                        ok_h = (st_head == h) & (kl < 2)
+                                    else:
+                                        ok_h = st_head == h
                                     if const_expr(4 * g + 4 > QL):
                                         ok_h = ok_h & row_ok[g]
                                     buffer_ops.buffer_store(
@@ -734,9 +779,12 @@ def compile_score_push(ql: int, topk: bool, small: bool):
 
         # one code path per split (selects in the page loop cost run calls ~1%)
         if unit:
-            scan(True)
+            scan(2)
         else:
-            scan(False)
+            if half:
+                scan(1)
+            else:
+                scan(0)
 
         # Every global write of the workgroup is an sc0 sc1 store, visible system-wide once drained (a system release
         # per workgroup writes back L2 every time: 512 workgroups +45 us). The last workgroup (dispatched last, so

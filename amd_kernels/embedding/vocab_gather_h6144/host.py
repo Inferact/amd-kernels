@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the amd-kernels project
-"""A collective load-time mapping of the four vocabulary shards; no weight copy."""
+"""A collective load-time mapping of the two or four vocabulary shards; no weight copy."""
 import ctypes
 import functools
 import torch
@@ -12,19 +12,20 @@ from amd_kernels.common.hip_runtime import load_hip_runtime
 
 
 @functools.cache
-def _kernel(dtype):return compile_vocab_gather(32 if dtype==torch.int32 else 64)
+def _kernel(dtype,ranks):return compile_vocab_gather(32 if dtype==torch.int32 else 64,ranks)
 
 
 class VocabGather:
     """Keep the checkpoint's bf16 shard on its owner and read it directly.
 
-    Construct once on each of four TP ranks after loading weights. Shards have
+    Construct once on each of the two or four TP ranks after loading weights. Shards have
     the same vocabulary size, rank order, hidden 6144, and contiguous bf16 data.
     The weights remain alive and immutable until ``close()``. No GPU copy is
     retained. Eager and graph calls launch the same stateless FlyDSL kernel.
     """
     def __init__(self,weight,rank,group):
-        assert dist.get_world_size(group)==4
+        self.ranks=dist.get_world_size(group)
+        assert self.ranks in (2,4),self.ranks
         assert weight.ndim==2 and weight.shape[1]==H and weight.dtype==torch.bfloat16 and weight.is_contiguous()
         if torch.cuda.current_device()!=weight.device.index or dist.get_rank(group)!=rank:
             raise ValueError('select this rank device before mapping weights')
@@ -53,7 +54,7 @@ class VocabGather:
         assert ids.ndim==1 and ids.is_contiguous() and ids.dtype in (torch.int32,torch.int64) and ids.device==self.weight.device
         m=ids.numel()
         out=torch.empty((m,H),dtype=torch.bfloat16,device=ids.device)
-        if m:_run_compiled(_kernel(ids.dtype),ids,self.peers,out,m,self.shard_vocab,torch.cuda.current_stream())
+        if m:_run_compiled(_kernel(ids.dtype,self.ranks),ids,self.peers,out,m,self.shard_vocab,torch.cuda.current_stream())
         return out
 
     def warm_up(self):

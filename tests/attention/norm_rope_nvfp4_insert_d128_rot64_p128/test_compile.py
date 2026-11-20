@@ -10,6 +10,8 @@
 2. TP4: the warm-up is what CUDA graph capture launches (1 .. 1024 tokens), eager steps up to 65536 (DBO
    micro-batches of >= 4096 above 8192); covered with the init call ``warmup_prefill_kernels``, not without it (strict
    xfail).
+3. TP2: with the init call ``warmup_prefill_kernels(32, 2, 2)`` and the capture sizes (up to 2048) nothing compiles
+   on eager steps up to 65536.
 """
 
 import flydsl.compiler as flyc
@@ -17,10 +19,11 @@ import pytest
 import torch
 from amd_kernels.attention.norm_rope_nvfp4_insert_d128_rot64_p128 import host
 
-from .test_norm_rope_insert import EPS, ROT, TP4, require_gfx950
+from .test_norm_rope_insert import EPS, ROT, TP2, TP4, require_gfx950
 
 PROBES = 6
-GETTERS = ("_get_kernel", "_get_prefill_kernel", "_get_reduce_kernel", "_get_streaming_q16_kernel")
+GETTERS = ("_get_kernel", "_get_prefill_kernel", "_get_reduce_kernel", "_get_streaming_q16_kernel",
+           "_get_vsplit_q32_kernel")
 
 
 def pairs(n):
@@ -33,8 +36,20 @@ def reduce_pairs(n, split):
     return 1 if n <= 32 else (2 if n <= 512 else 4)
 
 
-def key(n, prefill=False, split=0):
+def tp2_key(n, prefill=False, split=0):
+    if split:
+        return "_get_reduce_kernel", (*TP2, ROT, 1 if n <= 160 else 2, split)
+    if n < 8 and not prefill:
+        return "_get_kernel", (*TP2, ROT, 1)
+    if n <= 512 and not prefill:
+        return "_get_vsplit_q32_kernel", ()
+    return "_get_prefill_kernel", (*TP2, ROT, 4)
+
+
+def key(n, prefill=False, split=0, heads=TP4):
     """The getter and key the host should ask for."""
+    if heads == TP2:
+        return tp2_key(n, prefill, split)
     if split:
         return "_get_reduce_kernel", (*TP4, ROT, reduce_pairs(n, split), split)
     base_pairs = 4 if 489 <= n <= 512 else pairs(n)
@@ -50,8 +65,8 @@ class Data:
     """One batch of the largest size (a single request in contiguous slots); calls run
     on its first n tokens."""
 
-    def __init__(self, n_max, splits=()):
-        nq, nkv, niq = self.heads = TP4
+    def __init__(self, n_max, splits=(), heads=TP4):
+        nq, nkv, niq = self.heads = heads
         dev = "cuda"
         row = (nq + 2 * nkv + niq + 1) * 128
         self.qkv = torch.randn(n_max, row, device=dev).to(torch.bfloat16)
@@ -109,12 +124,16 @@ class Spy:
         assert self.keys == [want], f"n={n}: the host asked {self.keys}, the mirror says {want}"
 
 
-# (prefill, split) -> token range of the variant set
+# (heads, prefill, split) -> token range of the variant set
 RANGES = {
-    "q16_kv1_iq1": (False, 0, range(1, 65537)),
+    "q16_kv1_iq1": (TP4, False, 0, range(1, 65537)),
     # the QKV's deferred rows (split 3 up to 128 tokens, split 2 at 129-288)
-    "q16_kv1_iq1_split2": (False, 2, range(1, 513)),
-    "q16_kv1_iq1_split3": (False, 3, range(1, 513)),
+    "q16_kv1_iq1_split2": (TP4, False, 2, range(1, 513)),
+    "q16_kv1_iq1_split3": (TP4, False, 3, range(1, 513)),
+    "q32_kv2_iq2": (TP2, False, 0, range(1, 65537)),
+    "q32_kv2_iq2_prefill": (TP2, True, 0, range(1, 4097)),
+    "q32_kv2_iq2_split2": (TP2, False, 2, range(1, 1025)),
+    "q32_kv2_iq2_split3": (TP2, False, 3, range(1, 1025)),
 }
 
 
@@ -130,17 +149,17 @@ def warm_and_probe(served, variant):
 @torch.inference_mode()
 def test_token_count_not_in_key(name, monkeypatch):
     require_gfx950()
-    prefill, split, served = RANGES[name]
+    heads, prefill, split, served = RANGES[name]
     kw = dict(prefill=prefill, split=split)
-    data = Data(served[-1], (split,) if split else ())
+    data = Data(served[-1], (split,) if split else (), heads)
     spy = Spy(monkeypatch)
-    warm, probe = warm_and_probe(served, lambda n: key(n, **kw))
+    warm, probe = warm_and_probe(served, lambda n: key(n, **kw, heads=heads))
     for n in warm.values():
-        spy.call(data, n, key(n, **kw), **kw)
+        spy.call(data, n, key(n, **kw, heads=heads), **kw)
     torch.cuda.synchronize()
     spy.compiled.clear()
     for n in probe:
-        spy.call(data, n, key(n, **kw), **kw)
+        spy.call(data, n, key(n, **kw, heads=heads), **kw)
         assert not spy.compiled, f"{name}: n={n} compiled {spy.compiled} after warm-up on {sorted(warm.values())}"
 
 
@@ -193,22 +212,48 @@ def test_tp4_capture_alone_covers_serving(monkeypatch):
 
 def test_variants_are_few():
     """The served ranges reach a small set of variants (printed for the README)."""
-    variants = sorted({key(n, *RANGES[k][:2]) for k in RANGES for n in RANGES[k][2]})
+    variants = sorted({key(n, p, sk, h) for h, p, sk, rows in RANGES.values() for n in rows})
     print(f"{len(variants)} variants: {variants}")
-    # main 1 / 4 pairs, the streaming one-pair tile, prefill 4 / 8 pairs; the deferred QKV rows 1 / 2 token pairs x
-    # split 2 / 3
-    assert len(variants) == 9
+    # TP4: main 1 / 4 pairs, the streaming one-pair tile, prefill 4 / 8 pairs; the deferred QKV rows 1 / 2 token pairs
+    # x split 2 / 3. TP2: main 1 pair, the V-split one-pair tile, prefill 4 pairs; reduce 1 / 2 pairs x split 2 / 3
+    assert len(variants) == 9 + 7
+
+
+# vLLM's capture sizes up to the recipe's max_cudagraph_capture_size 2048
+TP2_CAPTURE = [1, 2, 4, *range(8, 256, 8), *range(256, 2049, 16)]
+TP2_EAGER = [1, 3, 7, 100, 333, 369, 401, 512, 513, 777, 1024, 1500, 2049, 4096, 8191, 12345, 16383, 32768, 65536]
 
 
 @torch.inference_mode()
-def test_prefill_init_warms_both_pair_counts(monkeypatch):
-    """One init call covers both prefill pair counts."""
+def test_tp2_capture_and_warmup_cover_serving(monkeypatch):
+    """TP2 with the init call ``warmup_prefill_kernels(32, 2, 2)`` and the capture sizes up to 2048."""
+    require_gfx950()
+    data = Data(65536, heads=TP2)
+    spy = Spy(monkeypatch)
+    host.warmup_prefill_kernels(*TP2, ROT)
+    for n in TP2_CAPTURE:
+        spy.call(data, n, key(n, heads=TP2))
+    torch.cuda.synchronize()
+    spy.compiled.clear()
+    late = {}
+    for n in TP2_EAGER:
+        spy.call(data, n, key(n, heads=TP2))
+        if spy.compiled:
+            late[n] = list(spy.compiled)
+            spy.compiled.clear()
+    assert not late, f"tp2: compiled after warm-up: {late}"
+
+
+@pytest.mark.parametrize("heads", [TP4, TP2], ids=["q16", "q32"])
+@torch.inference_mode()
+def test_prefill_init_warms_both_pair_counts(heads, monkeypatch):
+    """One init call covers every prefill pair count."""
     require_gfx950()
     spy = Spy(monkeypatch)
-    host.warmup_prefill_kernels(*TP4)
-    data = Data(32768)
+    host.warmup_prefill_kernels(*heads)
+    data = Data(32768, heads=heads)
     spy.compiled.clear()
-    for n in (8192, 24576, 32768):
+    for n in (600, 8192, 24576, 32768) if heads == TP2 else (8192, 24576, 32768):
         data.call(n)
     torch.cuda.synchronize()
     assert not spy.compiled, spy.compiled

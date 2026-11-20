@@ -7,9 +7,12 @@ Routes (``route``; the ids and the attention output are bit for bit the same on 
 
 - ``split4``: the four-GPU scorer + top-16 (``decode_top16.IndexDecodeTop16``, from ``decode_top16.SPLIT_MIN_REQS``
   requests), then the attention on its ids;
-- ``fused`` (one GPU, <= ``FUSED_MAX_ROWS`` rows, one index head per KV head, bf16 or fp16): the scorer
+- ``split2``: the two-GPU scorer + top-16 (TP2, from ``decode_top16.SPLIT2_MIN_REQS`` requests), then the attention on
+  its ids;
+- ``fused`` (one GPU, <= ``host.SELECT_MAX_ROWS`` rows, one index head per KV head, bf16 or fp16): the scorer
   (``nvfp4_index_score_rows``), then the attention with ``index_score=``, whose workgroups select the top-16
-  themselves: -0.84..-1.43 us per layer at 4-32 rows, -0.7..-2.2 us at 40-256 rows (32K-192K, bf16) against ``chain``;
+  themselves: -0.84..-1.43 us per layer at 4-32 rows, -0.7..-2.2 us at 40-256 rows (1 KV head, 32K-192K, bf16), -1.0..
+  -2.0 us at 8-1024 rows (2 KV heads, fp16) against ``chain``;
 - ``chain`` (one GPU, otherwise): ``nvfp4_index_score_top16`` (scorer + selector), then the attention.
 
 ``topk_idx`` holds the ids afterwards on every route (a layer that reuses the previous layer's top-16 reads it).
@@ -23,21 +26,19 @@ from amd_kernels.indexer.indexer_nvfp4_d128_p128_top16.score_decode import (
     nvfp4_index_score_top16,
 )
 
-from .host import nvfp4_sparse_decode, warm_up_decode
-
-# the in-attention selection was measured through 256 rows; larger steps keep the scorer + selector
-FUSED_MAX_ROWS = 256
+from .host import SELECT_MAX_ROWS, nvfp4_sparse_decode, warm_up_decode
 
 
 def route(index, num_reqs: int, query_len: int, num_index_heads: int, num_kv_heads: int,
           compute_type: torch.dtype = torch.bfloat16, split: bool = True) -> str:
-    """``"split4"``, ``"fused"`` or ``"chain"`` for a decode step (module doc); ``index``: the step's
+    """``"split4"``, ``"split2"``, ``"fused"`` or ``"chain"`` for a decode step (module doc); ``index``: the step's
     ``IndexDecodeTop16`` or None (one GPU)."""
-    if index is not None and index.route(num_reqs, query_len, num_index_heads, split) == "split4":
-        return "split4"
+    multi = "one_gpu" if index is None else index.route(num_reqs, query_len, num_index_heads, split)
+    if multi != "one_gpu":
+        return multi
     if (
         num_index_heads == num_kv_heads
-        and num_reqs * query_len <= FUSED_MAX_ROWS
+        and num_reqs * query_len <= SELECT_MAX_ROWS.get(num_kv_heads, 0)
         and compute_type in (torch.bfloat16, torch.float16)
     ):
         return "fused"
@@ -45,7 +46,7 @@ def route(index, num_reqs: int, query_len: int, num_index_heads: int, num_kv_hea
 
 
 def nvfp4_index_sparse_decode(
-    index,  # decode_top16.IndexDecodeTop16 (the four-GPU route's buffers) or None
+    index,  # decode_top16.IndexDecodeTop16 (the multi-GPU route's buffers) or None
     iq: torch.Tensor,  # [rows, index heads, 128] e4m3
     index_cache: torch.Tensor,  # NVFP4 index pages [num_blocks, 128, 72] uint8
     index_block_table: torch.Tensor,  # [reqs, max_blocks] int32, the index cache's pages
@@ -69,7 +70,7 @@ def nvfp4_index_sparse_decode(
     compute_type: torch.dtype = torch.bfloat16,
 ) -> str:
     """Index top-16 + sparse decode of the decode rows (module doc); returns the route taken. ``split`` False keeps
-    the step on one GPU (e.g. DBO micro-batches, where no collective orders the four-GPU push); ``compute_type``:
+    the step on one GPU (e.g. DBO micro-batches, where no collective orders the multi-GPU exchange); ``compute_type``:
     ``host.nvfp4_sparse_decode``'s. Graph-safe."""
     rows, heads, _ = iq.shape
     num_reqs = seq_lens.shape[0]
@@ -77,7 +78,7 @@ def nvfp4_index_sparse_decode(
     r = route(index, num_reqs, decode_query_len, heads, num_kv_heads, compute_type, split)
     topk = topk_idx[:, :rows]
     extra = {}
-    if r == "split4":
+    if r in ("split4", "split2"):
         index(iq, index_cache, index_block_table, index_seq_lens, init_blocks, local_blocks, topk,
               query_len=decode_query_len, max_seq_len=max_seq_len, split=split)
     elif r == "fused":

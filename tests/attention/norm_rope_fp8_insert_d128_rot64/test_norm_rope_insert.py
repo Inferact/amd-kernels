@@ -2,8 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the amd-kernels project
 """Both kernels against the contract in ``norm_rope_fp8_insert_d128_rot64/reference.py``.
 
-Served shapes (README): an M3.1 draft layer at TP4 (16 query heads, 1 KV head, 5
-layers, 128-token pages). The qkv kernel sees the draft's query block (R requests x 4
+Served shapes (README): an M3.1 draft layer at TP4 (16 query heads, 1 KV head) and TP2
+(32 query heads, 2 KV heads), 5 layers, 128-token pages. The qkv kernel sees the draft's query block (R requests x 4
 rows); the multi-layer kernel the context rows of a step (the accepted tokens in decode,
 a prefill chunk). Every case: q and every cache byte against the reference,
 the bytes the kernel must not write unchanged (skipped slots, other tokens), three
@@ -75,6 +75,12 @@ QKV_CASES = [
     ("tp4_t1000_p128", 1000, 16, 1, 128, 0.37, None, True),
     ("tp4_t384_p128_fewer_slots", 384, 16, 1, 128, 1.0, 300, True),
     ("tp4_t384_noinsert", 384, 16, 1, 128, 1.0, None, False),
+    ("tp2_t1_p128", 1, 32, 2, 128, 1.0, None, True),
+    ("tp2_t4_p128", 4, 32, 2, 128, 1.0, None, True),
+    ("tp2_t1000_p128", 1000, 32, 2, 128, 0.37, None, True),
+    ("tp2_t2048_p128", 2048, 32, 2, 128, 1.0, None, True),
+    ("tp2_t384_p128_fewer_slots", 384, 32, 2, 128, 1.0, 300, True),
+    ("tp2_t384_noinsert", 384, 32, 2, 128, 1.0, None, False),
 ]
 
 
@@ -139,6 +145,11 @@ ML_CASES = [
     ("tp4_n384_p128", 384, 1, 128, False, None),
     ("tp4_n4096_p128", 4096, 1, 128, True, 4000),
     ("tp4_n100_p128_dummy", 100, 1, 128, False, 0),
+    ("tp2_n7_p128", 7, 2, 128, False, None),
+    ("tp2_n384_p128", 384, 2, 128, False, None),
+    ("tp2_n4096_p128", 4096, 2, 128, True, 4000),
+    ("tp2_n8192_p128", 8192, 2, 128, False, None),
+    ("tp2_n100_p128_dummy", 100, 2, 128, False, 0),
 ]
 
 

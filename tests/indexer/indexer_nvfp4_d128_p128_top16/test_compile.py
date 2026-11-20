@@ -42,7 +42,7 @@ DECODE = [
     # the TP4 one-GPU route (one head per GPU), 8 rows: 1..64 requests
     ("h1q8", 1, 8, list(range(1, 65)), 64),
 ]
-PREFILL_HEADS = [1]
+PREFILL_HEADS = [1, 2]
 
 PREFILL_WARMUP_GAP = pytest.mark.xfail(
     strict=True,
@@ -312,7 +312,8 @@ def test_variants_are_few():
             for shape in PREFILL_GRID:
                 kernels.update(launched(lambda s=shape: chain.call(*s)))
             print(f"prefill h{heads} {'table' if table_topk else 'indices'}: {len(kernels)}")
-            assert len(kernels) <= (34 if table_topk else 7)
+            # two heads: also the shared-dequant scorer's 256-row tiles
+            assert len(kernels) <= (34 if table_topk else 7) + (heads == 2)
 
 
 # ---------------------------------------------------------------- rank-owned index cache

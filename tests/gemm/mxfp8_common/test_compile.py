@@ -31,6 +31,11 @@ RANGES = {
     "staged": range(769, 1025),
     "fourwave": range(769, 1281),
     "fourwave_nt": range(1281, 16385),
+    "decode_fq_n12288": range(5, 9),
+    "decode_cm0_n4608": range(289, 385),
+    "decode_k1536": range(449, 513),
+    "staged_n3072": range(897, 1025),
+    "fourwave_nt_n12288": range(769, 16385),
 }
 PROBES = 6
 
@@ -46,7 +51,7 @@ def variant(name, m, n, k, config):
     """The part of a launch that picks a compiled variant."""
     if config.kernel == "decode_fq":
         return None  # the kernel quantizes the bf16 activation itself
-    if config.kernel == "decode":
+    if config.kernel in ("decode", "decode_splitk"):
         return quantizer(-(-m // config.tile_m) * config.tile_m, shuffled=True)
     quant = quantizer(m, shuffled=False)
     if config.kernel in ("4wave", "4wave_nt"):
@@ -94,8 +99,8 @@ def test_no_compile_after_warmup(name, m, n, k, config, monkeypatch):
         )
 
 
-# inside a DBO microbatch (TP4: prefill steps of >= 8192 tokens, so >= 4096 rows per
-# microbatch) the 4-wave rows launch the plain grid, other kernels than outside one
+# inside a DBO microbatch (prefill steps from the DBO threshold on, e.g. >= 8192 tokens: >= 4096
+# rows per microbatch) the 4-wave rows launch the plain grid, other kernels than outside one
 DBO_RANGES = {"fourwave_nt": range(4096, 16385)}
 
 

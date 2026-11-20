@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the amd-kernels project
-"""``kernel.py`` at 8 rows per request, 16 query heads, 1 KV head, 8 XCDs, with the request arithmetic folded.
+"""``kernel.py`` at 8 rows per request, 16 query heads per KV head, 1 or 2 KV heads (``hkv``), 8 XCDs, with the request
+arithmetic folded.
 
 Splits 2 or 4 and kernel.py's prologue (the table barrier before the first loads); the host takes it at <= 192 rows
 where the prefetch variant does not fit. The numerics and every sum order are kernel.py's.
@@ -20,13 +21,16 @@ from .kernel import (
 )
 
 
-def compile_nvfp4_bf16mfma_gqa16_d128_p128_top16_q8_fixed(splits: int, quant: bool):
+def compile_nvfp4_bf16mfma_gqa16_d128_p128_top16_q8_fixed(splits: int, quant: bool, hkv: int = 1):
     """The launcher (splits 2 or 4)."""
+    assert hkv in (1, 2), hkv
+    HKV = hkv
     assert splits in (2, 4)
     SPLITS, TOPK, XCDS = splits, 16, 8
     PART_SCOPE = 0
     name = (
         f"nvfp4_bf16mfma_gqa16_d128_p128_top16_s{SPLITS}_xcd8_q8_fixed"
+        + ("_kv2" if HKV == 2 else "")
         + ("_mxfp8" if quant else "")
     )
 
@@ -134,10 +138,10 @@ def compile_nvfp4_bf16mfma_gqa16_d128_p128_top16_q8_fixed(splits: int, quant: bo
         i32_heavy: fx.Int32,  # (kernel.py's tail-grid arguments, unused)
         i32_tpx: fx.Int32,
     ):
-        # the served shape: 8 rows per request, 16 query heads, 1 KV head
+        # the served shape: 8 rows per request, 16 query heads per KV head, HKV KV heads
         i32_ql = fx.Int32(8)
-        i32_H = fx.Int32(16)
-        i32_hkv = fx.Int32(1)
+        i32_H = fx.Int32(16 * HKV)
+        i32_hkv = fx.Int32(HKV)
         smem = fx.SharedAllocator().allocate(Shared).peek()
         tx = fx.thread_idx.x
         bx, kvh = fx.block_idx.x, fx.block_idx.y

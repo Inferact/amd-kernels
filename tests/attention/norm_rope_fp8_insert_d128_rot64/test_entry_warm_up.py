@@ -11,7 +11,7 @@ import pytest
 import torch
 
 
-def scenario():
+def scenario(nq, nkv):
     from flydsl.compiler.jit_function import MlirCompiler
     from amd_kernels import warm_up
     from amd_kernels.attention.norm_rope_fp8_insert_d128_rot64.kv_norm_rope_insert_multilayer import (
@@ -28,7 +28,7 @@ def scenario():
 
     MlirCompiler.compile = spy
     dev, bf16 = torch.device("cuda"), torch.bfloat16
-    nq, nkv, nl = 16, 1, 5
+    nl = 5
     caches = [torch.zeros((8, nkv, 128, 256), dtype=torch.uint8, device=dev) for _ in range(nl)]
     one = torch.ones((), dtype=torch.float32, device=dev)
     w = torch.ones(128, dtype=bf16, device=dev)
@@ -51,10 +51,12 @@ def scenario():
     return {"late": bad, "reported": warm_up.late_compiles(), "warmed": len(warm_up.warmed())}
 
 
-def test_first_call_warm_up_compiles_every_variant(tmp_path):
+@pytest.mark.parametrize("nq,nkv", [(16, 1), (32, 2)], ids=["tp4", "tp2"])
+def test_first_call_warm_up_compiles_every_variant(tmp_path, nq, nkv):
     if not torch.cuda.is_available():
         pytest.skip("needs a GPU")
-    proc = subprocess.run([sys.executable, "-m", __name__], capture_output=True, text=True, timeout=600,
+    proc = subprocess.run([sys.executable, "-m", __name__, str(nq), str(nkv)], capture_output=True, text=True,
+                          timeout=600,
                           env={**os.environ, "FLYDSL_RUNTIME_CACHE_DIR": str(tmp_path / "flydsl")})
     assert proc.returncode == 0, proc.stdout[-3000:] + proc.stderr[-3000:]
     result = json.loads(proc.stdout.strip().splitlines()[-1])
@@ -62,4 +64,4 @@ def test_first_call_warm_up_compiles_every_variant(tmp_path):
 
 
 if __name__ == "__main__":
-    print(json.dumps(scenario()))
+    print(json.dumps(scenario(int(sys.argv[1]), int(sys.argv[2]))))

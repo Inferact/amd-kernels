@@ -32,7 +32,7 @@ def check_numeric(y,ref):
     assert (yf-rf).norm()/rf.norm()<=1e-3
 
 
-@pytest.mark.parametrize("n",[0,1,2,3,4,8,15,16,17,24,31,32,33,48,63,64])
+@pytest.mark.parametrize("n",[0,1,2,3,4,8,15,16,17,24,31,32,33,48,63,64,65,80,96,127,128])
 def test_reference(weight,n):
     x,idx,packed,y=operands(n)
     pack_bf16_rows(x,idx,packed)
@@ -69,7 +69,7 @@ def test_graph_no_compile_after_warmup(weight,monkeypatch):
     def track(*args,**kwargs):
         compiled.append(1);return original(*args,**kwargs)
     monkeypatch.setattr(MlirCompiler,"compile",track)
-    for n in (1,3,16,17,31,32,33,48,64):
+    for n in (1,3,16,17,31,32,33,48,64,65,100,128):
         x,idx,p,y=operands(n)
         graph=torch.cuda.CUDAGraph()
         with torch.cuda.graph(graph):
@@ -81,13 +81,24 @@ def test_graph_no_compile_after_warmup(weight,monkeypatch):
     assert compiled==[]
 
 
-def test_next_to_mfma(weight):
+@pytest.mark.parametrize("n",[64,128])
+def test_next_to_mfma(weight,n):
     from tests.mfma_spinner import mfma_spinner
     spin=mfma_spinner(256);stream=torch.cuda.Stream(priority=-1)
-    x,idx,p,y=operands(64);pack_bf16_rows(x,idx,p)
-    bf16_gemm_packed_rows(p,weight,64,y);torch.cuda.synchronize();expected=y.clone()
+    x,idx,p,y=operands(n);pack_bf16_rows(x,idx,p)
+    bf16_gemm_packed_rows(p,weight,n,y);torch.cuda.synchronize();expected=y.clone()
     for _ in range(20):
         spin(100000,stream)
-        bf16_gemm_packed_rows(p,weight,64,y)
+        bf16_gemm_packed_rows(p,weight,n,y)
         torch.cuda.synchronize()
         assert torch.equal(y.view(torch.int16),expected.view(torch.int16))
+
+
+def test_halves_match_two_64_row_calls(weight):
+    """The 128-row tier equals the 64-row kernel run on each half, bit for bit."""
+    x,idx,p,y=operands(128);pack_bf16_rows(x,idx,p)
+    bf16_gemm_packed_rows(p,weight,128,y)
+    for h in range(2):
+        q=torch.empty(64,K,device="cuda",dtype=torch.bfloat16);pack_bf16_rows(x,idx[h*64:(h+1)*64],q)
+        z=torch.empty(64,N,device="cuda",dtype=torch.bfloat16);bf16_gemm_packed_rows(q,weight,64,z)
+        assert torch.equal(y[h*64:(h+1)*64].view(torch.int16),z.view(torch.int16)),h

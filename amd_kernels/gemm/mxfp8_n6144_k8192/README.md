@@ -11,7 +11,7 @@ than 1024 rows; the rows below keep the decode chain's choices.
 ## Entry points
 - The common entries (`mxfp8_gemm`, `mxfp8_linear`, `warmup_mxfp8_gemm_weight`); the warm-up also compiles the
   split-2 row's ready-word clear.
-- `host.select`: this shape's config for a row count ahead of the tuned table (None: the table decides); it is the
+- `host.select`: this shape's config for a row count: its own kernels' windows, else its `ROWS`; it is the
   dispatch.
 - `host.LAUNCHERS`: the launcher of each kernel `select` names.
 

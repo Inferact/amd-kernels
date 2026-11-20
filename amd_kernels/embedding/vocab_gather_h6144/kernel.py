@@ -12,15 +12,16 @@ THREADS = 256
 PIECES = 3  # three contiguous 4096-byte pieces of each row
 
 
-def compile_vocab_gather(id_bits):
-    name=f"vocab_gather_ranks4_h6144_i{id_bits}"
+def compile_vocab_gather(id_bits,ranks=4):
+    assert ranks in (2,4)
+    name=f"vocab_gather_ranks{ranks}_h6144_i{id_bits}"
     @flyc.kernel(name=name,known_block_size=[THREADS,1,1])
     def kernel(ids: fx.Tensor, peers: fx.Tensor, out: fx.Tensor,
                rows: fx.Int32, shard_vocab: fx.Int32):
         tx, bx = fx.thread_idx.x, fx.block_idx.x
         row, piece = bx // PIECES, bx % PIECES
         token = fx.Int64(ids[row])
-        valid = (token >= 0) & (token < fx.Int64(shard_vocab * 4))
+        valid = (token >= 0) & (token < fx.Int64(shard_vocab * ranks))
         safe = valid.select(token,fx.Int64(0))
         owner = (safe // fx.Int64(shard_vocab)).to(fx.Int32)
         local = safe % fx.Int64(shard_vocab)

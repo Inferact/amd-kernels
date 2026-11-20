@@ -9,6 +9,7 @@ import torch
 
 from . import kernel as _kernel
 from . import max_window
+from .bf16mfma_gqa16_d128_p128_ring import compile_swa_fp8kv_bf16mfma_gqa16_d128_p128_ring
 from .device import initialize_xcd_topology, on_gfx950
 
 MAX_SPLITS = 6
@@ -96,6 +97,51 @@ def _tp4_q7_rows(reqs: int) -> int:
 
 
 @functools.cache
+def _get_ring_kernel(ql: int, splits: int, window: int, causal: bool, xcds: int, quant: bool, rows_per_half: int):
+    return compile_swa_fp8kv_bf16mfma_gqa16_d128_p128_ring(
+        ql, splits, window, causal, xcds, quant=quant, rows_per_half=rows_per_half
+    )
+
+
+# TP2 (2 KV heads per rank, window 4096, 128-token pages, 8 XCDs): per rows per request, (last request count, kernel,
+# splits); kernels: tq1 / tq2 / tq3 the query tiles, ring4 / ring2 the LDS-ring kernel with 4 / 2 rows per wave,
+# kernel the request-wide kernel. Graph-timed with cold K/V (benchmark_decode.py; causal within 2% of non-causal).
+_TP2_PLANS = {
+    7: ((1, "tq1", 6), (2, "tq1", 5), (4, "tq1", 3), (6, "tq2", 5), (10, "tq2", 3), (16, "tq2", 2),
+        (32, "ring4", 4), (40, "ring4", 3), (64, "ring4", 2), (None, "ring4", 1)),
+    3: ((4, "ring2", 12), (8, "ring2", 8), (16, "ring2", 6), (24, "ring2", 4), (32, "ring2", 3), (64, "ring2", 2),
+        (128, "ring2", 1), (None, "kernel", 1)),
+}
+
+
+def _tp2_plan(num_reqs: int, max_query_len: int) -> tuple[str, int]:
+    for last, kind, splits in _TP2_PLANS[max_query_len]:
+        if last is None or num_reqs <= last:
+            return kind, splits
+
+
+def _plan(num_reqs, num_kv_heads, block_size, max_query_len, window, causal, xcds, cus, waves, splits):
+    """(splits, ring rows per wave (0: not the ring kernel), batch rows, row groups) of a launch: the TP2 table, else
+    the request-wide split plan with the TP4 query tiles."""
+    if (splits is None and num_kv_heads == 2 and max_query_len in _TP2_PLANS and window == 4096
+            and block_size == 128 and xcds == 8 and waves == 4):
+        kind, splits = _tp2_plan(num_reqs, max_query_len)
+        if kind.startswith("ring"):
+            return splits, int(kind[4:]), False, 0
+        return splits, 0, False, int(kind[2:]) if kind.startswith("tq") else 0
+    splits = plan_splits(num_reqs, num_kv_heads, xcds, cus, splits)
+    # the query tiles and the 2-row batch kernel run split windows only (the TP4 draft
+    # at <= 128 requests); one split takes the request-wide kernel
+    group_rows = 0
+    if (num_kv_heads == 1 and max_query_len == 7 and window == 4096
+            and block_size == 128 and (causal or NONCAUSAL_Q7_TILES) and xcds == 8
+            and waves == 4 and splits > 1):
+        group_rows = _tp4_q7_rows(num_reqs)
+    batch_rows = num_kv_heads == 1 and max_query_len == 7 and splits > 1 and waves == 4
+    return splits, 0, batch_rows, group_rows
+
+
+@functools.cache
 def _split_buffers(device: torch.device):
     """The splits' partials and tickets (zero; the last split of a request resets
     its own). Allocated on first use (the warm-up), so graph capture records no
@@ -143,12 +189,14 @@ def plan_splits(
     return splits
 
 
-def launch_splits(q, kv_cache, num_reqs, splits=None, xcd_count=None) -> int:
-    """``plan_splits`` with the device's topology, as ``swa_decode_fp8kv`` uses."""
+def launch_splits(q, kv_cache, num_reqs, splits=None, xcd_count=None, max_query_len=None, window=4096) -> int:
+    """The split count ``swa_decode_fp8kv`` launches with on this device (``max_query_len`` None: the request-wide
+    plan)."""
     if xcd_count is None:
         xcd_count = initialize_xcd_topology()
     xcds = xcd_count if xcd_count and xcd_count > 1 else 0
-    return plan_splits(num_reqs, kv_cache.shape[1], xcds, _cu_count(q.device), splits)
+    return _plan(num_reqs, kv_cache.shape[1], kv_cache.shape[2], max_query_len, window, True, xcds,
+                 _cu_count(q.device), 4, splits)[0]
 
 
 def supports_swa_decode_fp8kv(
@@ -235,29 +283,17 @@ def swa_decode_fp8kv(
     xcds = xcd_count if xcd_count and xcd_count > 1 else 0
     group = xcds if xcds else 1
     grid_reqs = -(-num_reqs // group) * group
-    splits = plan_splits(num_reqs, num_kv_heads, xcds, _cu_count(q.device), splits)
-    # the query tiles and the 2-row batch kernel run split windows only (the TP4 draft
-    # at <= 128 requests); one split takes the request-wide kernel
-    group_rows = 0
-    if (num_kv_heads == 1 and max_query_len == 7 and window == 4096
-            and block_size == 128 and (causal or NONCAUSAL_Q7_TILES) and xcds == 8
-            and waves == 4 and splits > 1):
-        group_rows = _tp4_q7_rows(num_reqs)
+    splits, ring_rows, batch_rows, group_rows = _plan(num_reqs, num_kv_heads, block_size, max_query_len, window,
+                                                      causal, xcds, _cu_count(q.device), waves, splits)
     part, cnt = _split_buffers(q.device)
     c = float(np.float32(sm_scale) * np.float32(_kernel.LOG2E))
+    if ring_rows:
+        exe = _get_ring_kernel(max_query_len, splits, window, causal, xcds, quant_out is not None, ring_rows)
+    else:
+        exe = _get_kernel(max_query_len, splits, window, causal, block_size, xcds, waves, quant_out is not None,
+                          batch_rows, group_rows)
     _run_compiled(
-        _get_kernel(
-            max_query_len,
-            splits,
-            window,
-            causal,
-            block_size,
-            xcds,
-            waves,
-            quant_out is not None,
-            num_kv_heads == 1 and max_query_len == 7 and splits > 1 and waves == 4,
-            group_rows,
-        ),
+        exe,
         q.data_ptr(),
         kv_cache.data_ptr(),
         block_table.data_ptr(),
