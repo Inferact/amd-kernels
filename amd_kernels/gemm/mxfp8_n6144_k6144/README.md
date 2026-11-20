@@ -9,7 +9,7 @@ numerics contract are that folder's.
 ## Entry points
 - The common entries (`mxfp8_linear`, `mxfp8_gemm`, `mxfp8_gemm_shuffled`, `mxfp8_gemm_prequant`,
   `warmup_mxfp8_gemm_weight`).
-- `host.ROWS`: this shape's rows (`gemm.parse_rows`, the columns of `mxfp8_gemm_tuned.py`).
+- `host.ROWS`: this shape's rows (`gemm.parse_rows`).
 - `host.select`: the row for a row count (`gemm.select_from_rows`).
 
 ## Performance
@@ -18,5 +18,5 @@ Split-K decode at 33-256 rows beats the decode rows at every row count; K-wave 2
 `sweep_rows.py`).
 
 ## Tests
-- `python3 -m pytest tests/gemm/mxfp8_n6144_k6144 -q` (dispatch through this folder)
+- `python3 -m pytest tests/gemm/mxfp8_common/test_shape_folders.py -q` (dispatch through every folder)
 - `python3 -m pytest tests/gemm/mxfp8_common/test_decode_splitk.py -q` (the split-K rows of this shape)

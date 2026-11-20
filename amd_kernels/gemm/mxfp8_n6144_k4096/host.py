@@ -7,6 +7,7 @@ import functools
 
 import torch
 
+from amd_kernels.gemm.mxfp8_common.gemm import parse_rows, select_from_rows
 from amd_kernels.gemm.mxfp8_common.gemm import (
     _DECODE_FQ_KERNEL,
     _DECODE_KERNEL,
@@ -87,8 +88,8 @@ def _row(rows, m):
     return None
 
 
-def select(m: int, out_dtype: torch.dtype, allow_decode: bool) -> _Config | None:
-    """This shape's config for ``m`` rows ahead of the tuned table (``_select_config``), or None."""
+def _select_own(m: int, out_dtype: torch.dtype, allow_decode: bool) -> _Config | None:
+    """This shape's config for ``m`` rows ahead of ``ROWS`` (``_select_config``), or None."""
     if out_dtype != torch.bfloat16:
         return None
     if allow_decode:
@@ -171,3 +172,19 @@ LAUNCHERS = {
     _ONE_TILE_KERNEL: lambda config, a, sa, w, sw, out: _launch_256(a, sa, w, sw, out, one_tile=True),
     _PERSISTENT_KERNEL: lambda config, a, sa, w, sw, out: _launch_256(a, sa, w, sw, out, one_tile=False),
 }
+
+
+# This shape's rows. ``ROWS`` holds one ``min_m`` 65536 row: it lists the shape in ``gemm.tuned_shapes``;
+# ``_select_own`` picks every row.
+ROWS = parse_rows("""\
+M,N,K,out_dtype,kernel,tile_m,tile_n,tile_k,waves_m,waves_n,waves_per_eu,xcd_swizzle,split_k,la_w,la_a,min_m,w_cm
+65536,6144,4096,bf16,4wave_nt,256,256,128,2,2,1,1,1,,,65536
+""")
+
+
+def select(m: int, out_dtype: torch.dtype, allow_decode: bool) -> _Config | None:
+    """This shape's row for ``m``: its own kernels' windows (``_select_own``), else ``ROWS``."""
+    config = _select_own(m, out_dtype, allow_decode)
+    if config is not None:
+        return config
+    return select_from_rows(ROWS, m, 6144, 4096, out_dtype, allow_decode)

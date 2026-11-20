@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the amd-kernels project
 """The MXFP8 GEMM rows and kernels of the QKV projection N 4992 x K 6144 (TP2), registered with the common
-dispatcher (``gemm.mxfp8_common.gemm._SHAPE_HOSTS``): every bf16 row of the shape (the tuned table only lists the shape), the
+dispatcher (``gemm.mxfp8_common.gemm._SHAPE_HOSTS``): every bf16 row of the shape (``ROWS`` only lists the shape), the
 deferred (split-K partial) rows of the fused norm / RoPE / insert chain, and the launches of the persistent kernel
 (``persistent``), one or two (a row split) per call."""
 
@@ -9,6 +9,7 @@ import functools
 
 import torch
 
+from amd_kernels.gemm.mxfp8_common.gemm import parse_rows, select_from_rows
 from amd_kernels.gemm.mxfp8_common.gemm import (
     _DECODE_KERNEL,
     _PLAIN_GRID_MAX,
@@ -127,7 +128,7 @@ def _decode_row(m):
     return None
 
 
-def select(m: int, out_dtype: torch.dtype, allow_decode: bool) -> _Config | None:
+def _select_own(m: int, out_dtype: torch.dtype, allow_decode: bool) -> _Config | None:
     """The shape's row for ``m`` rows (``_select_config``); None keeps the common fallback (fp16 output, row-major
     codes at up to ``ROW_MAJOR_FALLBACK_MAX`` rows)."""
     if out_dtype != torch.bfloat16:
@@ -204,3 +205,19 @@ LAUNCHERS = {
                                                                              w, sw, out),
     _PERSISTENT_SPLIT_KERNEL: lambda config, a, sa, w, sw, out: _launch_split(a, sa, w, sw, out),
 }
+
+
+# This shape's rows. ``ROWS`` holds one ``min_m`` 65536 row: it lists the shape in ``gemm.tuned_shapes``;
+# ``_select_own`` picks every row.
+ROWS = parse_rows("""\
+M,N,K,out_dtype,kernel,tile_m,tile_n,tile_k,waves_m,waves_n,waves_per_eu,xcd_swizzle,split_k,la_w,la_a,min_m,w_cm
+65536,4992,6144,bf16,aiter,128,128,128,0,0,2,4,1,,,65536
+""")
+
+
+def select(m: int, out_dtype: torch.dtype, allow_decode: bool) -> _Config | None:
+    """This shape's row for ``m``: its own kernels' windows (``_select_own``), else ``ROWS``."""
+    config = _select_own(m, out_dtype, allow_decode)
+    if config is not None:
+        return config
+    return select_from_rows(ROWS, m, 4992, 6144, out_dtype, allow_decode)

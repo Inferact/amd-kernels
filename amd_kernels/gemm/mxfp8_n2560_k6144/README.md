@@ -13,7 +13,7 @@ names; the deferred partials feed the split-K reduce + norm / RoPE / NVFP4 inser
 - The common entries (`mxfp8_linear`, `mxfp8_gemm`, `mxfp8_gemm_prequant`, `prequant_code_tile_rows` +
   `mxfp8_gemm_shuffled`, which returns `SkPartials` on a deferred row); `warmup_mxfp8_gemm_weight` also compiles the
   deferred rows.
-- `host.select`: this shape's config for a row count ahead of the tuned table (None: the table decides).
+- `host.select`: this shape's config for a row count: its own kernels' windows, else its `ROWS`.
 - `host.select_prequant`: the config for producer codes where it differs from `select`.
 - `host.select_deferred`: the split-K partial row that the fused norm / RoPE / insert chain reduces.
 - `host.LAUNCHERS`: the launcher of each kernel these name.

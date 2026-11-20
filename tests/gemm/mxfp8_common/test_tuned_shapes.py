@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the amd-kernels project
-"""``gemm.tuned_shapes``: the (N, K) shapes with dtype-specific rows (the table's or a shape folder's ``ROWS``), the
+"""``gemm.tuned_shapes``: the (N, K) shapes with dtype-specific rows (the shape folders' ``ROWS``), the
 set a caller switches by shape."""
 import pytest
 import torch
@@ -12,15 +12,8 @@ TP4 = {(2560, 6144), (6144, 2048), (6144, 6144), (6144, 3072), (1536, 6144), (61
 
 
 
-def _all_rows():
-    """The table's rows and the shape folders' own (``ROWS``)."""
-    rows = dict(G._load_tuned_configs())
-    for n, k in G._SHAPE_HOSTS:
-        rows.update(getattr(G._shape_host(n, k), "ROWS", {}))
-    return rows
-
 def test_bf16_is_the_tables_bf16_keys():
-    table = _all_rows()
+    table = G._load_tuned_configs()
     got = G.tuned_shapes(torch.bfloat16)
     assert got == {(n, k) for n, k, d in table if d == "bf16"}
     assert G.tuned_shapes() == got
@@ -28,13 +21,13 @@ def test_bf16_is_the_tables_bf16_keys():
 
 
 def test_any_only_shapes_are_out():
-    table = _all_rows()
+    table = G._load_tuned_configs()
     any_only = {(n, k) for n, k, d in table if d == "any"} - {(n, k) for n, k, d in table if d == "bf16"}
     assert not any_only & G.tuned_shapes(torch.bfloat16)
 
 
 def test_fp16_and_other_dtypes():
-    table = _all_rows()
+    table = G._load_tuned_configs()
     assert G.tuned_shapes(torch.float16) == {(n, k) for n, k, d in table if d == "fp16"}
     with pytest.raises(KeyError):
         G.tuned_shapes(torch.float32)
@@ -42,7 +35,7 @@ def test_fp16_and_other_dtypes():
 
 def test_every_tuned_shape_selects_a_bf16_row_at_m1():
     """At one row each tuned shape picks a row of its own bf16 block, not an AITER default."""
-    table = _all_rows()
+    table = G._load_tuned_configs()
     for n, k in G.tuned_shapes(torch.bfloat16):
         rows = table[(n, k, "bf16")]
         if rows[0][1].min_m > 1:

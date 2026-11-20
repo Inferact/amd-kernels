@@ -7,11 +7,12 @@ of every MXFP8 linear (``mxfp8_linear``, ``mxfp8_gemm``, ``mxfp8_gemm_shuffled``
 Both implementations consume the same E4M3 weights and E8M0 per-32 scales.
 The AITER implementation is adapted from PR #4254 at revision 1e2e3a5 (its MXFP8 case).
 
-The tuned table is ``mxfp8_gemm_tuned.py``; the switches are constants at their
-served default; ``DBO`` / ``set_dbo_query`` stand in for vLLM's ``dbo_enabled()``;
-and ``mxfp8_linear`` / ``mxfp8_gemm`` take an optional explicit ``config`` (tests and
-benchmarks). ``_select_config`` picks the table row. The kernels and rows of
-one shape live in that shape's folder (``_SHAPE_HOSTS``: gemm/mxfp8_n<N>_k<K>).
+Each shape's rows (and kernels of its own) live in its folder (``_SHAPE_HOSTS``:
+gemm/mxfp8_n<N>_k<K>/host.py, ``ROWS`` and ``select``); ``_select_config`` asks it and falls
+back to generic tiles for a shape without one. The switches are constants at their served
+default; ``DBO`` / ``set_dbo_query`` stand in for vLLM's ``dbo_enabled()``; and
+``mxfp8_linear`` / ``mxfp8_gemm`` take an optional explicit ``config`` (tests and
+benchmarks).
 """
 
 import csv
@@ -24,7 +25,6 @@ from dataclasses import dataclass
 
 import torch
 
-from .mxfp8_gemm_tuned import TUNED_CSV
 
 MXFP8_VALUE_DTYPE = torch.float8_e4m3fn
 MXFP8_SCALE_DTYPE = torch.uint8
@@ -74,18 +74,27 @@ _SHUFFLED_A_KERNELS = (*_DECODE_KERNELS, _DECODE_SPLITK_KERNEL)
 _FOURWAVE_KERNEL = "4wave"
 _FOURWAVE_NT_KERNEL = "4wave_nt"
 _FOURWAVE_KERNELS = (_FOURWAVE_KERNEL, _FOURWAVE_NT_KERNEL)
-# Shapes with kernels or rows of their own (gemm/mxfp8_n<N>_k<K>/host.py): ``select`` (their rows
-# ahead of the table), ``LAUNCHERS`` (kernel name -> launch), and optionally ``ROWS`` (the
-# folder's own table, ``parse_rows``; it lists the shape in ``tuned_shapes``),
+# The shape folders (gemm/mxfp8_n<N>_k<K>/host.py): ``ROWS`` (the shape's rows, ``parse_rows``;
+# ``tuned_shapes`` lists a shape with rows for a dtype), ``select`` (the config for a row
+# count), ``LAUNCHERS`` (kernel name -> launch of the folder's own kernels), and optionally
 # ``select_prequant``, ``select_deferred``, ``decode_launcher``. The dispatcher imports a
 # host on first use.
 _SHAPE_HOSTS = {
+    (1280, 6144): "amd_kernels.gemm.mxfp8_n1280_k6144.host",
+    (1536, 6144): "amd_kernels.gemm.mxfp8_n1536_k6144.host",
+    (2304, 6144): "amd_kernels.gemm.mxfp8_n2304_k6144.host",
     (2560, 6144): "amd_kernels.gemm.mxfp8_n2560_k6144.host",
+    (3072, 6144): "amd_kernels.gemm.mxfp8_n3072_k6144.host",
+    (4608, 6144): "amd_kernels.gemm.mxfp8_n4608_k6144.host",
     (4992, 6144): "amd_kernels.gemm.mxfp8_n4992_k6144.host",
+    (6144, 768): "amd_kernels.gemm.mxfp8_n6144_k768.host",
+    (6144, 1536): "amd_kernels.gemm.mxfp8_n6144_k1536.host",
     (6144, 2048): "amd_kernels.gemm.mxfp8_n6144_k2048.host",
+    (6144, 3072): "amd_kernels.gemm.mxfp8_n6144_k3072.host",
     (6144, 4096): "amd_kernels.gemm.mxfp8_n6144_k4096.host",
     (6144, 6144): "amd_kernels.gemm.mxfp8_n6144_k6144.host",
     (6144, 8192): "amd_kernels.gemm.mxfp8_n6144_k8192.host",
+    (12288, 6144): "amd_kernels.gemm.mxfp8_n12288_k6144.host",
 }
 
 
@@ -122,13 +131,24 @@ _PRELOAD_HINTS = {
 def _load_tuned_configs() -> dict[
     tuple[int, int, str], tuple[tuple[int, _Config], ...]
 ]:
-    return parse_rows(TUNED_CSV)
+    """Every shape folder's rows (``ROWS``), by (N, K, out dtype)."""
+    rows = {}
+    for n, k in _SHAPE_HOSTS:
+        rows.update(_shape_host(n, k).ROWS)
+    return rows
 
 
 @functools.cache
 def parse_rows(text: str) -> dict[tuple[int, int, str], tuple[tuple[int, _Config], ...]]:
-    """The rows of a tuned-table CSV text (the columns of mxfp8_gemm_tuned.py), checked, by (N, K, out dtype): the
-    table's, or a shape folder's ``ROWS`` (read with ``select_from_rows``)."""
+    """A shape folder's rows (``ROWS``, read with ``select_from_rows``) from CSV text, checked, by (N, K, out dtype).
+
+    Graph-replay tuned on one MI355X with pointer-distinct rotating weights above the LLC. One row per (M upper
+    bound, N, K, output dtype): ``M`` is an inclusive upper bound, the rows of a shape are scanned in M order and
+    the first bound >= M decides; ``out_dtype`` ``any`` rows are the AITER defaults, ``bf16`` / ``fp16`` rows
+    override them within their measured range (``min_m`` narrows a row's range from below). Columns: ``M, N, K,
+    out_dtype``, ``kernel`` the variant (``aiter``, ``staged_ab``, ``decode``, ``decode_fq``, ``decode_splitk``,
+    ``4wave``, ``4wave_nt``), then the ``_Config`` fields (``tile_m, tile_n, tile_k, waves_m, waves_n,
+    waves_per_eu, xcd_swizzle, split_k, la_w, la_a, min_m, w_cm``)."""
     configs: dict[tuple[int, int, str], list[tuple[int, _Config]]] = {}
     for row in csv.DictReader(io.StringIO(text)):
         shape = (int(row["N"]), int(row["K"]), row["out_dtype"])
@@ -263,16 +283,12 @@ def splitk_rows(
 
 
 def tuned_shapes(out_dtype: torch.dtype = torch.bfloat16) -> frozenset[tuple[int, int]]:
-    """The (N, K) weight shapes whose table (or shape folder's ``ROWS``) has rows tuned for
-    ``out_dtype`` (bf16 or fp16 output). A caller that switches its linears to this entry by
-    shape switches these: any other shape runs only the AITER default rows or the generic
-    fallback tiles, which were never measured against other kernels."""
+    """The (N, K) weight shapes whose folder has rows tuned for ``out_dtype`` (bf16 or fp16
+    output). A caller that switches its linears to this entry by shape switches these: any
+    other shape runs only the AITER default rows or the generic fallback tiles, which were
+    never measured against other kernels."""
     name = {torch.bfloat16: "bf16", torch.float16: "fp16"}[out_dtype]
-    shapes = {(n, k) for n, k, d in _load_tuned_configs() if d == name}
-    for n, k in _SHAPE_HOSTS:
-        if (n, k, name) in getattr(_shape_host(n, k), "ROWS", {}):
-            shapes.add((n, k))
-    return frozenset(shapes)
+    return frozenset((n, k) for n, k, d in _load_tuned_configs() if d == name)
 
 
 def select_from_rows(
@@ -324,9 +340,6 @@ def _select_config(
         config = host.select(m, out_dtype, allow_decode)
         if config is not None:
             return config
-    config = select_from_rows(_load_tuned_configs(), m, n, k, out_dtype, allow_decode)
-    if config is not None:
-        return config
 
     # Fallback configs for untuned (N, K) shapes.
     if m <= 16:

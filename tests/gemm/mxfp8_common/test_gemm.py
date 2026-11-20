@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the amd-kernels project
 """Check each MXFP8 GEMM schedule against the contract in ``mxfp8/reference.py``.
 
-The cases are rows of the MiniMax-M3.1-Flash table (the rows of ``mxfp8_gemm_tuned.py``
+The cases are rows of the MiniMax-M3.1-Flash table (the rows of the shape folders' ``host.ROWS``
 and the decode windows of ``_select_config``) at an M inside the row's range, run with their explicit
 configuration.
 """

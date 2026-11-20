@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the amd-kernels project
 """The MXFP8 GEMM rows and kernels of the full o_proj N 6144 x K 8192 (``o_proj_full`` of the TP4
 sequence-parallel prefill), registered with the common dispatcher (``gemm.mxfp8_common.gemm._SHAPE_HOSTS``): its
-windows ahead of the tuned table, the 256x192 persistent tile (also the o_proj's K 2048 row at 3329-3968, see
+windows ahead of ``ROWS``, the 256x192 persistent tile (also the o_proj's K 2048 row at 3329-3968, see
 ``gemm/mxfp8_n6144_k2048``), and its one-tile and split-2 forms (the split-2 form with its ready words,
 ``split2_ready``)."""
 
@@ -10,15 +10,17 @@ import functools
 
 import torch
 
-from amd_kernels.gemm.mxfp8_common.gemm import _DECODE_FQ_KERNEL, _DECODE_KERNEL, _Config, _fourwave_grid_max
+from amd_kernels.gemm.mxfp8_common.gemm import (
+    _Config, _DECODE_FQ_KERNEL, _DECODE_KERNEL, _fourwave_grid_max, parse_rows, select_from_rows,
+)
 
 _PREFILL_N6144_K8192_192_KERNEL = "prefill_n6144_k8192_256x192"
 _PREFILL_N6144_K8192_192_ONE_KERNEL = "prefill_n6144_k8192_256x192_one_tile"
 _PREFILL_N6144_K8192_192_SPLIT2_KERNEL = "prefill_n6144_k8192_256x192_split2"
 
 
-def select(m: int, out_dtype: torch.dtype, allow_decode: bool) -> _Config | None:
-    """The rows ahead of the tuned table (``_select_config``), or None."""
+def _select_own(m: int, out_dtype: torch.dtype, allow_decode: bool) -> _Config | None:
+    """The rows ahead of ``ROWS`` (``_select_config``), or None."""
     # One-tile epilogue: measured graph/eager gain on the lower full-o_proj window.
     if out_dtype == torch.bfloat16 and 1281 <= m <= 1536:
         return _Config(256, 192, 128, 1, 1, 1, _PREFILL_N6144_K8192_192_ONE_KERNEL, 2, 2)
@@ -32,7 +34,7 @@ def select(m: int, out_dtype: torch.dtype, allow_decode: bool) -> _Config | None
     # 1024 -6.4 %, 897 -6.1 %, 769-896 -11 %, 417-768 -15..-22 %, graph and eager.
     if out_dtype == torch.bfloat16 and 416 < m <= 1024:
         return _Config(256, 192, 128, 1, 1, 1, _PREFILL_N6144_K8192_192_SPLIT2_KERNEL, 2, 2)
-    # Only the one measured token count overrides the tuned table.
+    # Only the one measured token count overrides ``ROWS``.
     if allow_decode and out_dtype == torch.bfloat16 and m == 4:
         return _Config(8, 32, 128, 0, 0, 1, _DECODE_FQ_KERNEL, 2, 0, 6, 3)
     # The decode rows of M 289..416 (K-waves 2 -> 4, sched_barriers on; 112x96 above 384 rows
@@ -130,3 +132,36 @@ LAUNCHERS = {
     _PREFILL_N6144_K8192_192_ONE_KERNEL: lambda config, a, sa, w, sw, out: _launch_prefill_n6144_k8192_192(a, sa, w, sw, out, one_tile=True),
     _PREFILL_N6144_K8192_192_SPLIT2_KERNEL: lambda config, a, sa, w, sw, out: _launch_prefill_n6144_k8192_192_split2(a, sa, w, sw, out),
 }
+
+
+# This shape's rows. Measured bf16 rows at 417-4095 (graph replay, one MI355X).
+ROWS = parse_rows("""\
+M,N,K,out_dtype,kernel,tile_m,tile_n,tile_k,waves_m,waves_n,waves_per_eu,xcd_swizzle,split_k,la_w,la_a,min_m,w_cm
+1,6144,8192,any,aiter,32,64,128,0,0,0,0,16,,
+4,6144,8192,any,aiter,32,128,256,0,0,0,0,8,,
+16,6144,8192,any,aiter,32,64,128,0,0,0,0,16,,
+64,6144,8192,any,aiter,64,64,256,0,0,0,0,4,,
+256,6144,8192,any,aiter,128,128,256,0,0,0,0,2,,
+1024,6144,8192,any,aiter,128,128,128,0,0,2,4,1,,
+4096,6144,8192,any,aiter,128,256,128,0,0,2,4,1,,
+16,6144,8192,bf16,decode,16,32,128,1,0,0,0,1,,
+32,6144,8192,bf16,decode,32,32,128,1,0,0,0,1,,
+64,6144,8192,bf16,decode,32,48,128,2,0,0,0,1,,
+96,6144,8192,bf16,decode,96,32,128,4,0,0,0,1,,
+128,6144,8192,bf16,decode,64,48,128,4,0,0,0,1,,
+192,6144,8192,bf16,decode,96,48,128,4,0,0,0,1,,
+256,6144,8192,bf16,decode,128,48,128,2,0,0,0,1,,
+288,6144,8192,bf16,decode,96,64,128,2,1,0,0,1,,,257,0
+384,6144,8192,bf16,decode,96,96,128,2,0,0,0,1,,
+1280,6144,8192,bf16,4wave_nt,128,256,128,2,2,1,1,1,,,417
+4608,6144,8192,bf16,4wave_nt,256,256,128,2,2,1,1,1,,,1281
+16384,6144,8192,bf16,4wave,256,256,128,2,2,1,1,1,,,4609
+""")
+
+
+def select(m: int, out_dtype: torch.dtype, allow_decode: bool) -> _Config | None:
+    """This shape's row for ``m``: its own kernels' windows (``_select_own``), else ``ROWS``."""
+    config = _select_own(m, out_dtype, allow_decode)
+    if config is not None:
+        return config
+    return select_from_rows(ROWS, m, 6144, 8192, out_dtype, allow_decode)

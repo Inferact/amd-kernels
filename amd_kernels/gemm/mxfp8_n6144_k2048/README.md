@@ -13,7 +13,7 @@ are that folder's. The attention kernels' MXFP8 epilogues write the o_proj input
 - `mxfp8_linear` and `mxfp8_gemm` at this shape only can write a caller-owned contiguous bf16 [M, 6144] arena on the
   activation device in place (same tiles and bits) and return it; a bad shape, dtype, device, stride or an input
   alias raises before any write. The caller owns its lifetime and orders readers after the producing stream.
-- `host.select`: this shape's config for a row count ahead of the tuned table (None: the table decides).
+- `host.select`: this shape's config for a row count: its own kernels' windows, else its `ROWS`.
 - `host.select_prequant`: the config for producer codes where it differs from `select`.
 - `host.decode_launcher`: the decode row whose activation stages through LDS (None: the common decode kernel).
 - `host.LAUNCHERS`: the launcher of each kernel these name.

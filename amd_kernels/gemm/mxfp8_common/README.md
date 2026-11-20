@@ -27,7 +27,7 @@ shared-expert gate_up 1536 / 3072 x 6144 and down 6144 x 768 / 1536, draft QKV 2
 - `gemm.mxfp8_e4m3_quantize_aiter`, `gemm.mxfp8_e4m3_quantize_shuffled`: the activation quantizer, row-major or
   (16, 16) codes.
 
-Dispatch: `gemm._select_config` reads the tuned table `mxfp8_gemm_tuned.py`; a shape folder's `host.select`
+Dispatch: `gemm._select_config` asks the shape's folder (`gemm/mxfp8_n<N>_k<K>/host.py`: `ROWS`, `select`); a folder's `host.select`
 (`gemm._SHAPE_HOSTS`) answers first; the `decode_splitk` rows run `mxfp8_gemm_decode_splitk.py`. `out=` (a caller's
 arena) is accepted for o_proj 6144 x 2048 / 4096.
 
