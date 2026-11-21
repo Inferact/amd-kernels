@@ -6,13 +6,16 @@ scales [N, K / 32], preshuffled at load ((16, 16) codes, AITER `shuffle_scale_a1
 K % 256 == 0, quantized per 1 x 32 block. Shapes (N x K) of the TP4 / TP2 shards: QKV 2560 / 4992 x 6144, o_proj
 6144 x 2048 / 4096, `o_proj_full` 6144 x 8192, dense gate_up 6144 / 12288 x 6144, dense down 6144 x 3072 / 6144,
 shared-expert gate_up 1536 / 3072 x 6144 and down 6144 x 768 / 1536, draft QKV 2304 / 4608 x 6144, draft context K / V
-1280 / 2560 x 6144. Callers: vLLM's MXFP8 linears, the norm + quant producers, the QKV chain, SP hand-offs.
+1280 / 2560 x 6144; DeepSeek-V4.1-Flash's DEP8 shapes (their folders below in `amd_kernels/README.md`). Callers:
+vLLM's MXFP8 linears, the norm + quant producers, the QKV chain, SP hand-offs.
 `reference.py`: exact dequant, fp32 sums, one rounding; cos >= 0.99999, L2 <= 1e-3, bitwise repeats.
 
 ## Entry points
 - `gemm.preshuffle_mxfp8_weight`, `gemm.preshuffle_mxfp8_weight_`: the load-time weight preshuffle; the in-place form
   returns False off `tuned_shapes()`.
 - `gemm.tuned_shapes`: the (N, K) with tuned rows (none for fp16 output); switch only these shapes.
+- `gemm.mxfp8_linear_blocker`: None when an M x N x K call (bf16, or row-major codes) has a tuned row that serves it,
+  else the reason; a folder with entries of its own (`linear`, `gemm`, `covers`) answers per row count.
 - `gemm.mxfp8_linear`: the GEMM from a bf16 / fp16 activation, quantized in the selected row's code layout.
 - `gemm.mxfp8_gemm`: the GEMM from row-major activation codes (never a decode row); row-major scales are shuffled
   first (torch).
