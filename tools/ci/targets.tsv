@@ -11,6 +11,34 @@
 # No pytest-xdist `-n` in a target's command: its workers would share the target's card, and each card runs one
 # target alone (ci.py). A precompile command may use `-n`: it runs on the shared compile card, which runs only
 # compile-only work, and FlyDSL compiles in parallel only in separate processes (it holds the GIL).
+attention/dcp8_lse_combine_vup_mla_h12_kv512/test_combine.py	8
+attention/dcp8_lse_combine_vup_mla_h12_kv512/test_warm_up.py	8
+attention/dcp8_q_bproj_wuk_gather_h96_kv512/test_compile.py	8
+attention/dcp8_q_bproj_wuk_gather_h96_kv512/test_query_gather.py	8
+attention/mla_decode_common/test_combine_ranks8.py	8
+attention/mla_decode_common/test_query_ranks8.py	8
+collectives/all_to_all_bf16_n20480_ranks8/test_exchange.py	8
+collectives/dcp8_topk_gather_merge_top2048/test_topk_gather_merge.py	8
+collectives/handshake_ranks8/test_handshake.py	8
+collectives/handshake_ranks8/test_warm_up.py	8
+collectives/logits_exchange_common/test_entry_ranks8.py	8
+collectives/topk_gather_merge_common/test_entry_ranks8.py	8
+embedding/vocab_gather_common/test_entry_ranks8.py	8
+embedding/vocab_gather_h7168_v163840_ranks8	8
+gemm/bf16_common/test_linear_gather_ranks8.py	8
+gemm/bf16_linear_gather_n896_k35840_ranks8/test_context_proj.py	8
+gemm/bf16_linear_gather_n896_k35840_ranks8/test_reduce_gather.py	8
+gemm/bf16_linear_gather_n896_k35840_ranks8/test_warm_up.py	8
+gemm/bf16_n20480_k7168/test_push.py	8
+moe/allreduce_latent_rmsnorm_up_proj_h3584_n896_ranks8/test_latent_tail.py	8
+moe/allreduce_latent_rmsnorm_up_proj_h3584_n896_ranks8/test_slots.py	8
+moe/allreduce_latent_rmsnorm_up_proj_h3584_n896_ranks8/test_warm_up.py	8
+moe/latent_moe_common/test_latent_tail_ranks8.py	8
+moe/latent_moe_common/test_layer_tail_ranks8.py	8
+moe/layer_tail_k2_h7168_ranks8/test_layer_tail.py	8
+norm/allreduce_attnres_rmsnorm_h7168_ranks8	8
+norm/attnres_rmsnorm_common/test_entry_ranks8.py	8
+
 indexer/indexer_nvfp4_d128_p128_top16/test_split4_rank_owned_ranks4.py	4
 
 collectives/pull_collectives_ranks4/test_slots4_reduce_scatter.py	4
@@ -61,22 +89,39 @@ gemm/bf16_concat_linear_n3072_k30720/test_compile.py	2
 gemm/bf16_n100032_k6144/test_publish.py	2		python3 -c "import tests, torch; from amd_kernels.gemm.bf16_n100032_k6144 import warmup_bf16_gemm_n100032_k6144 as w; [w(torch.device('cuda'), True, m) for m in ('contiguous', 'publish')]"
 
 # compile tests: compile-only mode, sharing one card (the same FlyDSL compiles, kernel and cache key, as a normal run)
+attention/dcp8_lse_combine_vup_mla_h12_kv512/test_compile.py	compile
+attention/dsa_prologue_qkv_a_norm_kv_insert_h7168/test_compile.py	compile
+attention/fp8_dense_mla_decode_h96_kv512/test_warm_up.py	compile
+attention/fp8_sparse_mla_decode_dcp8_h96_kv512_top2048/test_compile.py	compile
+attention/kda_decode_fb_gate_spec_h12_d128/test_compile.py	compile
+attention/kda_prefill_h12_d128/test_compile.py	compile
 attention/norm_rope_fp8_insert_d128_rot64/test_compile.py	compile
 attention/norm_rope_nvfp4_insert_d128_rot64_p128/test_compile.py	compile
 attention/nvfp4_sparse_decode_gqa16_d128_p128_top16/test_compile.py	compile
 attention/nvfp4_sparse_prefill_gqa16_d128_p128_top16/test_compile.py	compile
 attention/swa_decode_fp8kv_gqa16_d128/test_compile.py	compile
+collectives/handshake_ranks8/test_compile.py	compile
 gemm/mxfp8_common/test_compile.py	compile
 indexer/indexer_nvfp4_d128_p128_top16/test_compile.py	compile
+indexer/mxfp4_prefill_score_d128_h32/test_compile.py	compile
+indexer/mxfp4_prefill_topk_d128_h32_top2048/test_compile.py	compile
+moe/mxfp4_h3584_i3072_e896_top16/test_compile_entry.py	compile
 moe/mxfp4_h6144_i768_e128_top4/test_compile_entry.py	compile
 moe/mxfp4_h6144_i1536_e128_top4/test_compile_entry.py	compile
 norm/gemma_add_rmsnorm_h6144/test_compile.py	compile
+sampling/markov_gumbel_fused_v163840_r512/test_compile.py	compile
 
 # precompiled targets: their cold time is mostly compile (cold -> warm: test_moe 528 -> 21 s, test_gemm 347 -> 15,
 # test_dispatch 194 -> 8 (AITER's hipcc build of its CK module), test_publish 178 -> 17)
 gemm/bf16_n50016_k6144/test_gemm.py	1		same
 gemm/bf16_n100032_k6144/test_gemm.py	1		same
 gemm/mxfp8_common/test_shape_rows.py	1		same
+gemm/bf16_skinny_common/test_linear.py	1		same
+gemm/bf16_skinny_common/test_graph.py	1		same
+moe/mxfp4_h3584_i3072_e896_top16/test_experts.py	1		same
+moe/router_sigmoid_bias_top16_e896_h7168/test_router.py	1		same
+moe/router_sigmoid_bias_top16_e896_h7168/test_aux_sort.py	1		same
+gemm/bf16_latent_down_mxfp4_quant_k7168_n3584/test_down_quant.py	1		same
 attention/nvfp4_sparse_decode_gqa16_d128_p128_top16/test_index_decode_ranks4.py	4
 sampling/batch_sharded_markov_v200064_h6144_r256_ranks4/test_batch_sharded.py	4
 decoder/dense_mxfp8_h6144_i3072_ranks4/test_decoder_ranks4.py	4
