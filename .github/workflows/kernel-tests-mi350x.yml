@@ -1,10 +1,9 @@
 # The kernel tests on MI350X (gfx950, as MI355X): the same triggers and pipeline as kernel-tests.yml, on a
 # self-hosted runner on a Slurm submit host of an MI350X cluster. Either cluster passing is enough: each workflow posts
 # the commit status `kernel-tests` (the required check) when it passes.
-# What differs on that cluster: enroot imports the image from its registry (no AKR_IMAGE_URL), with the registry
-# credentials in $ENROOT_CONFIG_PATH/.credentials on storage the compute nodes see, and the job's memory per GPU is
-# AKR_CI_MEM_PER_GPU_MI350X. Site configuration comes from the repository's Actions variables (vars.*), as in
-# kernel-tests.yml.
+# What differs on that cluster: enroot's registry credentials are in $ENROOT_CONFIG_PATH/.credentials on storage the
+# compute nodes see, and the job's memory per GPU is AKR_CI_MEM_PER_GPU_MI350X. Site configuration comes from the
+# repository's Actions variables (vars.*), as in kernel-tests.yml.
 name: kernel tests (MI350X)
 
 on:
@@ -36,7 +35,6 @@ jobs:
       AKR_CI_MEM_PER_GPU: ${{ vars.AKR_CI_MEM_PER_GPU_MI350X }}
       ENROOT_TEST_SCRATCH: ${{ vars.ENROOT_TEST_SCRATCH }}
       ENROOT_CONFIG_PATH: ${{ vars.ENROOT_CONFIG_PATH_MI350X }}
-      AKR_IMAGE: ${{ vars.AKR_IMAGE }}
     steps:
       - uses: actions/checkout@v4
         with:

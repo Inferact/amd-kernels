@@ -17,6 +17,9 @@ rm -rf "$d"/base-* "$d"/trees-*
 mkdir -p "$base" "$trees"
 trap 'enroot remove -f "$AKR_ENROOT_NAME" > /dev/null 2>&1; rm -rf "$base" "$trees"' EXIT
 tar x -C "$base" -f "$RUN/tree.tar"
+# One image for the whole run: the digest the tag points to now (the nightly is retagged every day)
+AKR_IMAGE=$("$base/tools/enroot_test.sh" --resolve)
+export AKR_IMAGE
 # AMD cards: Slurm may set only CUDA_VISIBLE_DEVICES
 if [[ -z "${ROCR_VISIBLE_DEVICES:-}" && -n "${CUDA_VISIBLE_DEVICES:-}" ]]; then
     export ROCR_VISIBLE_DEVICES="$CUDA_VISIBLE_DEVICES"
@@ -37,6 +40,9 @@ if compgen -G "$CI_ROOT/wheels/*.whl" > /dev/null; then
 else
     echo "no wheels in $CI_ROOT/wheels/: pytest-xdist not installed"
 fi
+versions=$("$base/tools/enroot_test.sh" python3 -c 'from importlib.metadata import version as v
+print("; ".join(f"{p} {v(p)}" for p in ("vllm", "amd-aiter", "flydsl", "torch")))' 2>/dev/null | tail -1 || true)
+echo "image $AKR_IMAGE ($versions)"
 rc=0
 python3 "$base/tools/ci/ci.py" run --targets "$RUN/targets.tsv" --tree "$base" --trees "$trees" --out "$RUN" \
     --durations "$CI_ROOT/durations.json" || rc=$?
@@ -45,5 +51,6 @@ python3 "$base/tools/ci/ci.py" run --targets "$RUN/targets.tsv" --tree "$base" -
 report_rc=0
 python3 "$base/tools/ci/ci.py" report --out "$RUN" --durations "$CI_ROOT/durations.json" > "$RUN/report.md" \
     || report_rc=$?
+printf '\nImage: `%s` (%s)\n' "$AKR_IMAGE" "$versions" >> "$RUN/report.md"
 echo "$report_rc" > "$RUN/report.rc"
 exit $rc

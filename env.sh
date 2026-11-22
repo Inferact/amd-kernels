@@ -3,7 +3,7 @@
 AMD_KERNELS_REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 export AMD_KERNELS_REPO
 if [[ -z "${ROCM_PATH:-}" ]]; then
-  for _sdk in /opt/rocm-7.2.3 /opt/rocm-7.2.2 /opt/rocm; do
+  for _sdk in /opt/rocm; do
     if [[ -x "$_sdk/bin/hipcc" && -f "$_sdk/include/hip/hip_runtime.h" ]]; then
       ROCM_PATH="$_sdk"; break
     fi
@@ -11,11 +11,7 @@ if [[ -z "${ROCM_PATH:-}" ]]; then
   unset _sdk
 fi
 if [[ ! -x "${ROCM_PATH:-}/bin/hipcc" || ! -f "${ROCM_PATH:-}/include/hip/hip_runtime.h" ]]; then
-  echo "env.sh: set ROCM_PATH to a ROCm 7.2 SDK" >&2
-  return 1
-fi
-if [[ ! -r "$ROCM_PATH/.info/version" || "$(<"$ROCM_PATH/.info/version")" != 7.2.* ]]; then
-  echo "env.sh: ROCM_PATH must point to a ROCm 7.2 SDK" >&2
+  echo "env.sh: set ROCM_PATH to the image's ROCm SDK (bin/hipcc, include/hip)" >&2
   return 1
 fi
 export ROCM_PATH
@@ -39,6 +35,37 @@ sys.exit(v < (0, 5, 0))' 2>/dev/null; then
   export PYTHONPATH="$_fly:$PYTHONPATH"
   unset _fly
 fi
+# The test image is Docker Hub's vllm/vllm-openai-rocm:nightly, retagged every day: warn when this environment's vLLM
+# is not the newest nightly's commit (Docker Hub asked at most once an hour; no network, no vLLM: no check).
+python3 - "$AMD_KERNELS_REPO/.cache/nightly-tag" <<'PY' || true
+import json, os, re, sys, time, urllib.request
+from importlib import metadata
+try:
+    local = re.search(r"\+g([0-9a-f]{7,40})", metadata.version("vllm")).group(1)
+except Exception:
+    sys.exit(0)
+path = sys.argv[1]
+try:
+    if time.time() - os.path.getmtime(path) > 3600:
+        raise OSError
+    newest, when = open(path).read().split()
+except (OSError, ValueError):
+    url = "https://hub.docker.com/v2/repositories/vllm/vllm-openai-rocm/tags?page_size=25&ordering=last_updated"
+    try:
+        tags = json.load(urllib.request.urlopen(url, timeout=5))["results"]
+    except Exception:
+        sys.exit(0)
+    hit = next((t for t in tags if re.fullmatch(r"nightly-[0-9a-f]{40}", t["name"])), None)
+    if hit is None:
+        sys.exit(0)
+    newest, when = hit["name"][len("nightly-"):], hit["last_updated"][:16]
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w") as f:
+        f.write(f"{newest} {when}\n")
+if not newest.startswith(local):
+    print(f"env.sh: this image's vLLM is {local}, Docker Hub's vllm/vllm-openai-rocm:nightly is {newest[:12]} "
+          f"({when} UTC): docker pull vllm/vllm-openai-rocm:nightly (tools/enroot_test.sh imports it)", file=sys.stderr)
+PY
 # One cache directory for every kernel.
 # TORCHINDUCTOR_CACHE_DIR also avoids torch's getpass.getuser() default, which fails on nodes that cannot resolve
 # the uid.

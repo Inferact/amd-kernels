@@ -4,8 +4,8 @@
 # Either cluster passing is enough: this workflow and kernel-tests-mi350x.yml each post the commit status
 # `kernel-tests` (the required check) when they pass; a failing one posts nothing.
 # Site configuration comes from the repository's Actions variables (vars.*): AKR_CI_ROOT, AKR_CI_SCRATCH,
-# AKR_CI_PARTITION, ENROOT_TEST_SCRATCH, AKR_IMAGE, AKR_IMAGE_URL, AKR_IMAGE_SHA256 (tools/ci/run_tests.sh,
-# tools/ci/node_job.sh, tools/enroot_test.sh).
+# AKR_CI_PARTITION, ENROOT_TEST_SCRATCH (tools/ci/run_tests.sh, tools/ci/node_job.sh, tools/enroot_test.sh). The image
+# is Docker Hub's vllm/vllm-openai-rocm:nightly at the digest the tag points to when the job starts.
 name: kernel tests
 
 on:
@@ -35,9 +35,6 @@ jobs:
       AKR_CI_SCRATCH: ${{ vars.AKR_CI_SCRATCH }}
       AKR_CI_PARTITION: ${{ vars.AKR_CI_PARTITION }}
       ENROOT_TEST_SCRATCH: ${{ vars.ENROOT_TEST_SCRATCH }}
-      AKR_IMAGE: ${{ vars.AKR_IMAGE }}
-      AKR_IMAGE_URL: ${{ vars.AKR_IMAGE_URL }}
-      AKR_IMAGE_SHA256: ${{ vars.AKR_IMAGE_SHA256 }}
     steps:
       - uses: actions/checkout@v4
         with:

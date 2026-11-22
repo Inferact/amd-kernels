@@ -13,8 +13,11 @@ it may change without notice: do not depend on it directly. We plan to offer the
 
 ## Requirements
 
-- MI355X or MI350X (gfx950), ROCm 7.2, Python 3.12, PyTorch for ROCm.
-- [FlyDSL](https://github.com/ROCm/FlyDSL) >= 0.5.0 and [AITER](https://github.com/ROCm/aiter).
+- MI355X or MI350X (gfx950).
+- The vLLM ROCm nightly image, `vllm/vllm-openai-rocm:nightly` (retagged every day): its ROCm, Python, PyTorch,
+  [AITER](https://github.com/ROCm/aiter) and [FlyDSL](https://github.com/ROCm/FlyDSL) (>= 0.5.0) are the ones the
+  tests and CI run with. `source env.sh` warns when the image is older than Docker Hub's nightly
+  (`docker pull vllm/vllm-openai-rocm:nightly`); `tools/enroot_test.sh` imports the current one itself.
 
 ## Install and test
 
