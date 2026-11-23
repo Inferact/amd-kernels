@@ -77,16 +77,23 @@ _FOURWAVE_KERNELS = (_FOURWAVE_KERNEL, _FOURWAVE_NT_KERNEL)
 # The shape folders (gemm/mxfp8_n<N>_k<K>/host.py): ``ROWS`` (the shape's rows, ``parse_rows``;
 # ``tuned_shapes`` lists a shape with rows for a dtype), ``select`` (the config for a row
 # count), ``LAUNCHERS`` (kernel name -> launch of the folder's own kernels), and optionally
-# ``select_prequant``, ``select_deferred``, ``decode_launcher``. The dispatcher imports a
-# host on first use.
+# ``select_prequant``, ``select_deferred``, ``decode_launcher``, and for a folder with entries of its own ``linear``
+# / ``gemm`` (serve a bf16 / row-major-codes call, or None), ``covers`` (its rows beat the served path at M) and
+# ``warmup``. The dispatcher imports a host on first use.
 _SHAPE_HOSTS = {
     (1280, 6144): "amd_kernels.gemm.mxfp8_n1280_k6144.host",
     (1536, 6144): "amd_kernels.gemm.mxfp8_n1536_k6144.host",
+    (1792, 5120): "amd_kernels.gemm.mxfp8_n1792_k5120.host",
     (2304, 6144): "amd_kernels.gemm.mxfp8_n2304_k6144.host",
     (2560, 6144): "amd_kernels.gemm.mxfp8_n2560_k6144.host",
     (3072, 6144): "amd_kernels.gemm.mxfp8_n3072_k6144.host",
+    (4096, 1280): "amd_kernels.gemm.mxfp8_n4096_k1280.host",
+    (4608, 5120): "amd_kernels.gemm.mxfp8_n4608_k5120.host",
     (4608, 6144): "amd_kernels.gemm.mxfp8_n4608_k6144.host",
     (4992, 6144): "amd_kernels.gemm.mxfp8_n4992_k6144.host",
+    (5120, 2304): "amd_kernels.gemm.mxfp8_n5120_k2304.host",
+    (5120, 8192): "amd_kernels.gemm.mxfp8_n5120_k8192.host",
+    (5120, 15360): "amd_kernels.gemm.mxfp8_n5120_k15360.host",
     (6144, 768): "amd_kernels.gemm.mxfp8_n6144_k768.host",
     (6144, 1536): "amd_kernels.gemm.mxfp8_n6144_k1536.host",
     (6144, 2048): "amd_kernels.gemm.mxfp8_n6144_k2048.host",
@@ -95,6 +102,8 @@ _SHAPE_HOSTS = {
     (6144, 6144): "amd_kernels.gemm.mxfp8_n6144_k6144.host",
     (6144, 8192): "amd_kernels.gemm.mxfp8_n6144_k8192.host",
     (12288, 6144): "amd_kernels.gemm.mxfp8_n12288_k6144.host",
+    (25600, 6144): "amd_kernels.gemm.mxfp8_n25600_k6144.host",
+    (32768, 1280): "amd_kernels.gemm.mxfp8_n32768_k1280.host",
 }
 
 
@@ -289,6 +298,28 @@ def tuned_shapes(out_dtype: torch.dtype = torch.bfloat16) -> frozenset[tuple[int
     never measured against other kernels."""
     name = {torch.bfloat16: "bf16", torch.float16: "fp16"}[out_dtype]
     return frozenset((n, k) for n, k, d in _load_tuned_configs() if d == name)
+
+
+def mxfp8_linear_blocker(
+    m: int, n: int, k: int, out_dtype: torch.dtype = torch.bfloat16, prequant: bool = False
+) -> str | None:
+    """None when ``mxfp8_linear`` (or, with ``prequant``, ``mxfp8_gemm`` on row-major codes and scales) serves an
+    M x N x K call from its shape folder's tuned rows; else the reason a caller logs before its own path. A folder
+    with ``covers`` answers per row count (its rows that lost to the served path decline)."""
+    host = _shape_host(n, k)
+    if host is None:
+        return f"mxfp8_linear: no shape folder for N {n} x K {k}"
+    covers = getattr(host, "covers", None)
+    if covers is not None:
+        if out_dtype != torch.bfloat16:
+            return f"mxfp8_linear: N {n} x K {k} has bf16 rows only"
+        if not covers(m, prequant):
+            codes = " (codes)" if prequant else ""
+            return f"mxfp8_linear: N {n} x K {k} at {m} rows{codes}: no tuned row that beats the served path"
+        return None
+    if out_dtype not in (torch.bfloat16, torch.float16) or (n, k) not in tuned_shapes(out_dtype):
+        return f"mxfp8_linear: N {n} x K {k} has no tuned rows for {out_dtype}"
+    return None
 
 
 def select_from_rows(
@@ -764,6 +795,11 @@ def mxfp8_linear(
     if out is not None and torch._C._overlaps(out, x):
         raise ValueError("out= must not overlap the inputs")
     explicit = config
+    if config is None and out is None:
+        linear = getattr(_shape_host(n, k), "linear", None)
+        y = linear(x, weight, weight_scale, out_dtype) if linear is not None else None
+        if y is not None:
+            return y
     if config is None:
         config = _select_config(m, n, k, out_dtype)
     if config.kernel == _DECODE_FQ_KERNEL:
@@ -820,6 +856,11 @@ def mxfp8_gemm(
         raise ValueError(f"Unsupported output dtype: {out_dtype}")
     if out is not None:
         _validate_oproj_output(out, activation, weight, weight_scale, out_dtype, m, n, k, activation_scale)
+    if config is None and out is None and not activation_scale_preshuffled:
+        gemm = getattr(_shape_host(n, k), "gemm", None)
+        y = gemm(activation, activation_scale, weight, weight_scale, out_dtype) if gemm is not None else None
+        if y is not None:
+            return y
     if config is None:
         config = _select_config(m, n, k, out_dtype, allow_decode=False)
     if config.kernel in _SHUFFLED_A_KERNELS:
@@ -1102,6 +1143,9 @@ def warmup_mxfp8_gemm_weight(
     if _warmed_weights.get(key, 0) >= max_num_tokens:
         return
     _warmup_weight(weight, weight_scale, max_num_tokens, out_dtype)
+    warmup = getattr(_shape_host(n, k), "warmup", None)
+    if warmup is not None and out_dtype == torch.bfloat16:
+        warmup(weight, weight_scale)
     if k == 6144:  # the fused add + norm + quant that writes this GEMM's codes
         from amd_kernels.norm.gemma_add_rmsnorm_h6144.add_rmsnorm import warmup_for_gemm
 

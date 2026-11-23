@@ -129,3 +129,5 @@ decoder/dense_mxfp8_h6144_i3072_ranks4/test_decoder_ranks4.py	4
 attention/nvfp4_sparse_decode_gqa16_d128_p128_top16/test_index_decode_ranks2.py	2
 sampling/batch_sharded_markov_v200064_h6144_r256_ranks2/test_batch_sharded.py	2
 decoder/dense_mxfp8_h6144_i6144_ranks2/test_decoder_ranks2.py	2
+engram/ngram_rows_mxfp8_d256_c24_ranks8/test_ngram_rows_ranks8.py	8
+moe/fused_ep_mxfp4_h5120_i2304_e48_top6_ranks8/test_fused_ranks8.py	8

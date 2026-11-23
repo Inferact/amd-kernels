@@ -2,6 +2,26 @@
 
 One line per kernel package. Each package's README has what it does, its entry points, performance and tests.
 
+## Op entries
+
+Callers use one shape-agnostic entry per op ([`routes.py`](routes.py), issue #11): it reads the shape from its
+tensors and calls the shape package; `<op>_blocker(...)` returns None or the reason a call is not covered (the caller
+falls back), `<op>_shapes()` the covered shape keys.
+
+- `gemm.mxfp8_common.gemm`: `mxfp8_linear`, `mxfp8_gemm` (+ `mxfp8_linear_blocker`, `tuned_shapes`) over the
+  `gemm/mxfp8_n<N>_k<K>` folders in `gemm._SHAPE_HOSTS`.
+- `gemm`: `mxfp8_gate_up_swiglu_mxfp8[_prequant]` (gate_up + clamped SwiGLU + MXFP8).
+- `gemm`: `mxfp8_postmix_gemm`, `mxfp8_postmix_gates_gemm` (MXFP8 GEMM + mHC post-mix epilogue).
+- `gemm`: `mxfp8_grouped_gemm`, `mxfp8_grouped_gemm_mxfp8` (grouped MXFP8 GEMM, bf16 or MXFP8 out).
+- `gemm`: `bf16_gemm` (lm_head), `bf16_gemm_f32_bf16` (fp32 + bf16 columns in one GEMM).
+- `attention`: `sparse_mla_decode`, `rope_fp8_kv_insert`, `compressor_insert`.
+- `indexer`: `mxfp4_indexer_topk`, `mxfp4_indexer_candidate_topk`, `q_rope_mxfp4_quant`.
+- `moe`: `router_topk`, `mxfp4_experts` (+ `mxfp4_expert_weights`), `expert_parallel` (fused EP, a collective).
+- `norm`: `rmsnorm_mxfp8`, `rmsnorm_dual_mxfp8`, `mhc_post_pre_rmsnorm`, `mhc_post_collapse_rmsnorm`, `mhc_gate_finish`.
+- `activation`: `clamp_silu_mul_mxfp8`.
+- `sampling`: `markov_chain`, `rejection_sample`.
+- `engram`: `ngram_rows`, `gated_post`.
+
 ## GEMM
 
 - [`gemm/mxfp8_common`](gemm/mxfp8_common/README.md): MXFP8 dense GEMM entries (`mxfp8_linear`, `mxfp8_gemm`, ...),
@@ -24,6 +44,7 @@ One line per kernel package. Each package's README has what it does, its entry p
 - [`gemm/mxfp8_n6144_k8192`](gemm/mxfp8_n6144_k8192/README.md): the full output projection of the sequence-parallel
   prefill.
 - [`gemm/mxfp8_n12288_k6144`](gemm/mxfp8_n12288_k6144/README.md): the rows of the 12288 x 6144 GEMM.
+- [`gemm/mxfp8_n25600_k6144`](gemm/mxfp8_n25600_k6144/README.md): the rows of the 25600 x 6144 GEMM (Engram `wkv`).
 - [`gemm/mxfp8_gateup_swiglu_n6144_k6144_i3072`](gemm/mxfp8_gateup_swiglu_n6144_k6144_i3072/README.md): dense MLP
   gate_up + SwiGLU at 1-8 rows (TP4).
 - [`gemm/mxfp8_gateup_swiglu_n12288_k6144_i6144`](gemm/mxfp8_gateup_swiglu_n12288_k6144_i6144/README.md): dense MLP
@@ -39,6 +60,30 @@ One line per kernel package. Each package's README has what it does, its entry p
   five taps at TP4, and the four-rank gather.
 - [`gemm/bf16_concat_linear_n3072_k30720`](gemm/bf16_concat_linear_n3072_k30720/README.md): the draft's input fc over
   five taps at TP2, and the two-rank exchange.
+- [`gemm/mxfp8_n1792_k5120`](gemm/mxfp8_n1792_k5120/README.md): fused wq_a + wkv projection, N 1792 x K 5120, decode
+  rows, quantization in the GEMM.
+- [`gemm/mxfp8_n32768_k1280`](gemm/mxfp8_n32768_k1280/README.md): the wq_b projection, N 32768 x K 1280, decode rows.
+- [`gemm/mxfp8_n4096_k1280`](gemm/mxfp8_n4096_k1280/README.md): the indexer wq_b projection, N 4096 x K 1280, decode
+  rows.
+- [`gemm/mxfp8_n4608_k5120`](gemm/mxfp8_n4608_k5120/README.md): the shared-expert gate_up projection, N 4608 x K 5120,
+  decode rows.
+- [`gemm/mxfp8_n5120_k2304`](gemm/mxfp8_n5120_k2304/README.md): the shared-expert down projection, N 5120 x K 2304,
+  decode rows.
+- [`gemm/mxfp8_n5120_k8192`](gemm/mxfp8_n5120_k8192/README.md): the wo_b projection, N 5120 x K 8192, decode rows.
+- [`gemm/mxfp8_n5120_k15360`](gemm/mxfp8_n5120_k15360/README.md): the draft's input projection over three tapped
+  hidden states, N 5120 x K 15360.
+- [`gemm/mxfp8_decode_prequant`](gemm/mxfp8_decode_prequant/README.md): decode-row MXFP8 GEMM on pre-quantized rows,
+  with a clamped swiglu + MXFP8 epilogue.
+- [`gemm/mxfp8_grouped_g8_n1024_k4096`](gemm/mxfp8_grouped_g8_n1024_k4096/README.md): grouped MXFP8 GEMM, 8 groups x N
+  1024 x K 4096 (the low-rank output projection's first GEMM), bf16 or MXFP8 out.
+- [`gemm/mxfp8_postmix_hc4_n5120_k8192`](gemm/mxfp8_postmix_hc4_n5120_k8192/README.md): MXFP8 GEMM N 5120 x K 8192
+  with the four-stream mHC post-mix epilogue.
+- [`gemm/mxfp8_postmix_add_hc4_n5120_k2304`](gemm/mxfp8_postmix_add_hc4_n5120_k2304/README.md): MXFP8 GEMM N 5120 x K
+  2304 with the routed add and the mHC post-mix epilogue.
+- [`gemm/bf16_k5120_n1056_f32_n32`](gemm/bf16_k5120_n1056_f32_n32/README.md): bf16 GEMM, K 5120: fp32 compressor
+  columns plus 32 bf16 weight columns, one launch.
+- [`gemm/bf16_n129280_k5120`](gemm/bf16_n129280_k5120/README.md): the full-vocabulary lm_head, N 129280 x K 5120,
+  bf16.
 - [`gemm/bf16_skinny_common`](gemm/bf16_skinny_common/README.md): the dense bf16 linears of a 1-192 row decode step
   (attention in/out projections, shared experts, latent down, lm_head, drafter context projection) on a load-time
   packed weight, one tuned tile table.
@@ -58,6 +103,16 @@ One line per kernel package. Each package's README has what it does, its entry p
 - [`moe/mxfp4_h6144_i1536_e128_top4`](moe/mxfp4_h6144_i1536_e128_top4/README.md): the TP2 MoE block (I 1536 per rank):
   routed MXFP4 experts (A4W4) with the MXFP8 shared expert (a TP shard, or the full copy: its shard read in place,
   the whole expert on a sequence-parallel rank's own rows).
+- [`moe/mxfp4_h5120_i2304_e48_top6`](moe/mxfp4_h5120_i2304_e48_top6/README.md): routed MXFP8 x MXFP4 experts, 48 local
+  experts, top 6, H 5120 I 2304.
+- [`moe/mxfp4_h5120_i2304_e16_top3`](moe/mxfp4_h5120_i2304_e16_top3/README.md): routed MXFP8 x MXFP4 experts, 16 local
+  experts, top 3, H 5120 I 2304.
+- [`moe/fused_ep_mxfp4_h5120_i2304_e48_top6_ranks8`](moe/fused_ep_mxfp4_h5120_i2304_e48_top6_ranks8/README.md):
+  one-launch expert-parallel MoE on eight ranks: dispatch, experts, combine.
+- [`moe/router_sqrtsoftplus_top6_h5120_e384`](moe/router_sqrtsoftplus_top6_h5120_e384/README.md): router: gate GEMM
+  and biased sqrt-softplus top-6 of 384 experts.
+- [`moe/router_sqrtsoftplus_top3_h5120_e128`](moe/router_sqrtsoftplus_top3_h5120_e128/README.md): router: gate GEMM
+  and biased sqrt-softplus top-3 of 128 experts.
 - [`moe/latent_moe_common`](moe/latent_moe_common/README.md): latent MoE decode entries (`router_sigmoid_bias_topk`,
   `mxfp4_moe_experts`, `allreduce_latent_rmsnorm_up_proj`, `layer_tail_launch`, ...): the shape -> package routing and
   the reason a call has no kernel.
@@ -89,6 +144,12 @@ One line per kernel package. Each package's README has what it does, its entry p
   sliding-window decode attention over an fp8 KV cache, 1 or 2 KV heads per GPU (TP4 / TP2).
 - [`attention/norm_rope_fp8_insert_d128_rot64`](attention/norm_rope_fp8_insert_d128_rot64/README.md): the draft's
   norm + RoPE + fp8 KV insert, 1 or 2 KV heads per GPU (TP4 / TP2).
+- [`attention/rope_fp8_kv_insert_h64_d512_rot64`](attention/rope_fp8_kv_insert_h64_d512_rot64/README.md): query RoPE +
+  e4m3 quant and KV RoPE + e4m3 cache insert, 64 heads of 512.
+- [`attention/compressor_insert_d512_idx128_rot64`](attention/compressor_insert_d512_idx128_rot64/README.md):
+  compressor pool + RMSNorm + RoPE and the latent / indexer key cache inserts.
+- [`attention/sparse_mla_decode_fp8kv_h64_d512_rot64`](attention/sparse_mla_decode_fp8kv_h64_d512_rot64/README.md):
+  sparse decode attention, 64 heads x d512, e4m3 KV, inverse-RoPE MXFP8 output.
 - [`attention/norm_rope_insert_common`](attention/norm_rope_insert_common/README.md): RMS norm + RoPE + KV insert
   entries (`qkv_norm_rope_insert`, `kv_norm_rope_insert_multilayer`): the shape -> package routing and the reason a
   call has no kernel.
@@ -127,6 +188,17 @@ One line per kernel package. Each package's README has what it does, its entry p
 - [`indexer/indexer_nvfp4_d128_p128_top16`](indexer/indexer_nvfp4_d128_p128_top16/README.md): the sparse-attention
   indexer: block scores over NVFP4 index pages and the top-16 blocks, decode and prefill, one GPU at 1 / 2 index heads
   (TP4 / TP2), or two or four GPUs at decode.
+- [`indexer/indexer_mxfp4_h32_d128_top512`](indexer/indexer_mxfp4_h32_d128_top512/README.md): MXFP4 indexer top-512
+  over decode rows without writing the logits.
+- [`indexer/q_rope_mxfp4_quant_h32_d128_rot64`](indexer/q_rope_mxfp4_quant_h32_d128_rot64/README.md): indexer query
+  RoPE + MXFP4 quant, 32 heads of 128.
+
+## Engram
+
+- [`engram/ngram_rows_mxfp8_d256_c24_ranks8`](engram/ngram_rows_mxfp8_d256_c24_ranks8/README.md): n-gram hash and
+  MXFP8 row pull from the owner ranks' tables, eight ranks.
+- [`engram/gated_post_bf16_h5120_hc4`](engram/gated_post_bf16_h5120_hc4/README.md): gated Engram update of the four
+  residual streams, bf16.
 - [`indexer/mxfp4_indexer_common`](indexer/mxfp4_indexer_common/README.md): MXFP4 DSA indexer entries
   (`mxfp4_paged_score_topk`, `mxfp4_prefill_score`, `mxfp4_prefill_topk`): the shape -> package routing and the reason a
   call has no kernel.
@@ -152,6 +224,8 @@ One line per kernel package. Each package's README has what it does, its entry p
   TP4 down GEMM (I 3072).
 - [`activation/swiglu_oai_mxfp8_i6144`](activation/swiglu_oai_mxfp8_i6144/README.md): SwiGLU + MXFP8 quant for the
   TP2 down GEMM (I 6144).
+- [`activation/clamp_silu_mul_mxfp8_i2304`](activation/clamp_silu_mul_mxfp8_i2304/README.md): clamped SiLU-mul + MXFP8
+  quant for the shared expert's down GEMM.
 
 ## Norms
 
@@ -164,6 +238,15 @@ One line per kernel package. Each package's README has what it does, its entry p
   all-reduce + Gemma norm with bf16-rounded MXFP8.
 - [`norm/gemma_rmsnorm_bf16_mxfp8_h6144`](norm/gemma_rmsnorm_bf16_mxfp8_h6144/README.md): Gemma RMSNorm to
   bf16-rounded MXFP8.
+- [`norm/rmsnorm_mxfp8_h5120`](norm/rmsnorm_mxfp8_h5120/README.md): RMSNorm + MXFP8 quant, H 5120.
+- [`norm/rmsnorm_dual_mxfp8_q1280_kv512`](norm/rmsnorm_dual_mxfp8_q1280_kv512/README.md): dual RMSNorm: q row to
+  MXFP8, kv row to bf16.
+- [`norm/mhc_post_pre_rmsnorm_h5120`](norm/mhc_post_pre_rmsnorm_h5120/README.md): mHC seam in one launch: post-mix,
+  gates, collapse, RMSNorm (+ MXFP8).
+- [`norm/mhc_gate_finish_rmsnorm_h5120`](norm/mhc_gate_finish_rmsnorm_h5120/README.md): mHC seam finisher: GEMM tile
+  records to gates, collapse and RMSNorm (+ MXFP8).
+- [`norm/mhc_post_collapse_rmsnorm_h5120`](norm/mhc_post_collapse_rmsnorm_h5120/README.md): mHC step-end tail:
+  post-mix, collapse and final RMSNorm.
 - [`norm/attnres_rmsnorm_common`](norm/attnres_rmsnorm_common/README.md): the all-reduce + AttnRes + RMSNorm entry
   (`attnres_comm`): (hidden, world size) -> package and the reason a call has no kernel.
 - [`norm/allreduce_attnres_rmsnorm_h7168_ranks8`](norm/allreduce_attnres_rmsnorm_h7168_ranks8/README.md): eight-rank
@@ -233,6 +316,10 @@ One line per kernel package. Each package's README has what it does, its entry p
   vocabulary (163840, 200064) -> package and the reason a call has no kernel.
 - [`sampling/top_p_mask_f32_v200064`](sampling/top_p_mask_f32_v200064/README.md): vLLM's top-p without top-k on fp32
   logits rows, bit for bit: the split chain (<= 64 rows) in one launch, the one-program-per-row kernel above.
+- [`sampling/markov_chain_gumbel_bf16_v129280_r256_s5`](sampling/markov_chain_gumbel_bf16_v129280_r256_s5/README.md):
+  5-step Markov draft chain for every request of the batch in one launch.
+- [`sampling/rejection_standard_v129280_s5`](sampling/rejection_standard_v129280_s5/README.md): standard rejection
+  sampling of 5 draft tokens, two launches.
 - [`sampling/top_p_mask_f32_v163840`](sampling/top_p_mask_f32_v163840/README.md): top-p mask of <= 64 fp32 logits rows,
   vocabulary 163840: vLLM's split top-p chain in one launch.
 
