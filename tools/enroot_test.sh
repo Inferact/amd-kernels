@@ -87,6 +87,7 @@ sqsh="$SCRATCH/images/$SQSH_NAME"
 exec 9> "$sqsh.lock"
 flock 9
 if [[ ! -f "$sqsh" ]]; then
+    rm -f "$sqsh.tmp"  # an import a killed call left (we hold the lock)
     if [[ -z "$IMAGE_URL" ]]; then
         src=$IMAGE
         [[ -z $digest ]] || src=$image_repo@$digest
