@@ -62,16 +62,16 @@ def calls(kind, inputs, pkg):
     """(entry op, direct op, entry reason) of one call, without the step work around it (table, ``begin_step``)."""
     if kind == "decode":
         return (lambda: E.kda_decode_fb_gate_spec(**inputs), lambda: pkg.kda_decode_fb_gate_spec(**inputs),
-                lambda: E.kda_decode_fb_gate_spec_unsupported_reason(**inputs))
+                lambda: E.kda_decode_fb_gate_spec_blocker(**inputs))
     if kind == "prefill":
         args, kw = inputs
         kw = dict(kw, table=pkg.chunk_table(args[11], args[12], args[9], args[10]))
         return (lambda: E.kda_prefill(*args, **kw), lambda: pkg.prefill(*args, **kw),
-                lambda: E.kda_prefill_unsupported_reason(*args, **kw))
+                lambda: E.kda_prefill_blocker(*args, **kw))
     ws, args, kw = inputs
     ws = ws[True]
     return (lambda: E.kda_mono_decode(ws, 0, *args, **kw), lambda: pkg.kda_mono_decode_k1(ws, 0, *args, **kw),
-            lambda: E.kda_mono_decode_unsupported_reason(ws, 0, *args, **kw))
+            lambda: E.kda_mono_decode_blocker(ws, 0, *args, **kw))
 
 
 @torch.inference_mode()

@@ -19,16 +19,17 @@ arguments of its op. The packed weights keep the raw weights' shapes: pass the e
 ## Entry points
 
 - `available`: gfx950 with FlyDSL importable.
-- `bf16_latent_down_mxfp4_quant`, `..._unsupported_reason`: the op and whether a call is served.
+- `bf16_latent_down_mxfp4_quant`, `..._blocker`: the op and whether a call is served.
 - `bf16_latent_down_mxfp4_quant_shapes`, `..._weight_reason`: load-time coverage, from the weight (and bias) alone.
 - `latent_down_xcd_local`: turns the L2-local partial exchange off on a device (a kernel running beside it).
 - `latent_down_swap_stream_workspaces`: lend one stream's workspaces to another (a graph capture stream).
-- `linear_gather_comm`, `linear_gather_comm_unsupported_reason`: the collective communicator of the group.
-- `linear_gather_pack_weight`, `linear_gather_pack_aux` (+ `_unsupported_reason`), `linear_gather_packed_tiles`,
+- `linear_gather_comm`, `linear_gather_comm_blocker`, `prepare_linear_gather_comm`: the collective communicator of
+  the group, whether it can be built, the communicator or the reason.
+- `linear_gather_pack_weight`, `linear_gather_pack_aux` (+ `_blocker`), `linear_gather_packed_tiles`,
   `linear_gather_rows_buffer`: the load-time weight layout and the packed activations.
-- `bf16_linear_gather`, `..._unsupported_reason`, `..._shapes`: the op (routed by its communicator) and its coverage.
+- `bf16_linear_gather`, `..._blocker`, `..._shapes`: the op (routed by its communicator) and its coverage.
 
-Dispatch: `_SHAPE_HOSTS` in `latent_down.py` and `linear_gather.py` (key -> host module of the shape package).
+Dispatch: `_ROUTES` in `latent_down.py` and `linear_gather.py` (key -> host module of the shape package).
 
 ## Performance
 

@@ -12,6 +12,8 @@ import sys
 import pytest
 import torch
 
+from amd_kernels import routes
+from amd_kernels.indexer import mxfp4_indexer_common as E
 from amd_kernels.indexer.mxfp4_indexer_common import paged, prefill
 
 META = "meta"
@@ -48,42 +50,41 @@ def topk_args(rows=16, width=8192, topk=2048):
 
 @pytest.fixture
 def on_gfx950(monkeypatch):
-    monkeypatch.setattr(paged, "available", lambda: True)
-    monkeypatch.setattr(prefill, "available", lambda: True)
+    monkeypatch.setattr(routes, "available", lambda: True)
 
 
 def test_tables_import_and_export():
-    for name in paged._SHAPE_HOSTS.values():
+    for name in paged._ROUTES.hosts.values():
         mod = importlib.import_module(name)
         assert callable(mod.mxfp4_paged_score_topk) and hasattr(mod.mxfp4_paged_score_topk, "entry")
         assert callable(mod.prefer_fused) and callable(mod.host.plan)
         assert callable(mod.host._scratch) and callable(mod.host._scratch_set)
         assert mod.geometry.COUNTER_BYTES and mod.geometry.MAX_ROWS and mod.geometry.QMAX
         assert mod.geometry.COUNTER_GROUPS and mod.host.TIER_WIDTHS
-    for name in prefill._SCORE_HOSTS.values():
+    for name in prefill._SCORE_ROUTES.hosts.values():
         mod = importlib.import_module(name)
         assert callable(mod.score_rows) and importlib.import_module(name + ".kernel").MAX_OUT_BYTES
-    for name in prefill._TOPK_HOSTS.values():
+    for name in prefill._TOPK_ROUTES.hosts.values():
         mod = importlib.import_module(name)
         assert callable(mod.topk_rows) and callable(mod.workspace_bytes)
 
 
 def test_shapes_are_the_tables():
-    assert paged.mxfp4_paged_score_topk_shapes() == frozenset(paged._SHAPE_HOSTS)
-    assert prefill.mxfp4_prefill_score_shapes() == frozenset(prefill._SCORE_HOSTS)
-    assert prefill.mxfp4_prefill_topk_shapes() == frozenset(prefill._TOPK_HOSTS)
+    assert paged.mxfp4_paged_score_topk_shapes() == frozenset(paged._ROUTES.hosts)
+    assert prefill.mxfp4_prefill_score_shapes() == frozenset(prefill._SCORE_ROUTES.hosts)
+    assert prefill.mxfp4_prefill_topk_shapes() == frozenset(prefill._TOPK_ROUTES.hosts)
 
 
 def test_covered_keys_route_to_their_package():
-    for key, name in paged._SHAPE_HOSTS.items():
+    for key, name in paged._ROUTES.hosts.items():
         heads, d, topk, page = key
         a = paged_args(heads=heads, d=d, topk=topk, page=page)
         assert paged._route(a["q_payload"], a["out_indices"], a["cache"]).__name__ == name
         assert paged.mxfp4_paged_score_topk_kernel(**a) is importlib.import_module(name).mxfp4_paged_score_topk
         assert paged._scratch_host(a["cache"], a["out_indices"], need=True).__name__ == name
-    for (heads, d), name in prefill._SCORE_HOSTS.items():
+    for (heads, d), name in prefill._SCORE_ROUTES.hosts.items():
         assert prefill._score_route(score_args(heads=heads, d=d)["q_payload"]).__name__ == name
-    for (topk,), name in prefill._TOPK_HOSTS.items():
+    for (topk,), name in prefill._TOPK_ROUTES.hosts.items():
         assert prefill._topk_route(topk_args(topk=topk)["out"]).__name__ == name
         assert prefill.prefill_topk_workspace_bytes(64, 8192, topk=topk) == importlib.import_module(
             name).workspace_bytes(64, 8192)
@@ -91,17 +92,17 @@ def test_covered_keys_route_to_their_package():
 
 def test_signatures_match_the_ops():
     pairs = [
-        (paged.mxfp4_paged_score_topk, paged.mxfp4_paged_score_topk_unsupported_reason),
+        (paged.mxfp4_paged_score_topk, paged.mxfp4_paged_score_topk_blocker),
         (paged.mxfp4_paged_score_topk, paged.mxfp4_paged_score_topk_kernel),
-        (prefill.mxfp4_prefill_score, prefill.mxfp4_prefill_score_unsupported_reason),
-        (prefill.mxfp4_prefill_topk, prefill.mxfp4_prefill_topk_unsupported_reason),
+        (prefill.mxfp4_prefill_score, prefill.mxfp4_prefill_score_blocker),
+        (prefill.mxfp4_prefill_topk, prefill.mxfp4_prefill_topk_blocker),
     ]
     for op, other in pairs:
         assert inspect.signature(op).parameters == inspect.signature(other).parameters, other.__name__
     routed = [
-        (paged.mxfp4_paged_score_topk, paged._SHAPE_HOSTS, "mxfp4_paged_score_topk", ("split",)),
-        (prefill.mxfp4_prefill_score, prefill._SCORE_HOSTS, "score_rows", ()),
-        (prefill.mxfp4_prefill_topk, prefill._TOPK_HOSTS, "topk_rows", ()),
+        (paged.mxfp4_paged_score_topk, paged._ROUTES.hosts, "mxfp4_paged_score_topk", ("split",)),
+        (prefill.mxfp4_prefill_score, prefill._SCORE_ROUTES.hosts, "score_rows", ()),
+        (prefill.mxfp4_prefill_topk, prefill._TOPK_ROUTES.hosts, "topk_rows", ()),
     ]
     for op, hosts, name, extra in routed:
         for mod in hosts.values():
@@ -111,18 +112,18 @@ def test_signatures_match_the_ops():
 
 def test_off_table_shapes(on_gfx950):
     cases = [
-        (paged.mxfp4_paged_score_topk, paged.mxfp4_paged_score_topk_unsupported_reason, paged_args(heads=16),
+        (paged.mxfp4_paged_score_topk, paged.mxfp4_paged_score_topk_blocker, paged_args(heads=16),
          "heads=16, d=128, topk=2048, page_rows=64", "(32, 128, 2048, 64)"),
-        (paged.mxfp4_paged_score_topk, paged.mxfp4_paged_score_topk_unsupported_reason, paged_args(topk=1024),
+        (paged.mxfp4_paged_score_topk, paged.mxfp4_paged_score_topk_blocker, paged_args(topk=1024),
          "topk=1024", "(32, 128, 2048, 64)"),
-        (prefill.mxfp4_prefill_score, prefill.mxfp4_prefill_score_unsupported_reason, score_args(heads=64),
+        (prefill.mxfp4_prefill_score, prefill.mxfp4_prefill_score_blocker, score_args(heads=64),
          "heads=64, d=128", "(32, 128)"),
-        (prefill.mxfp4_prefill_topk, prefill.mxfp4_prefill_topk_unsupported_reason, topk_args(topk=512),
+        (prefill.mxfp4_prefill_topk, prefill.mxfp4_prefill_topk_blocker, topk_args(topk=512),
          "topk=512", "(2048,)"),
     ]
     for op, reason, args, dims, covered in cases:
         why = reason(**args)
-        assert why is not None and "no kernel" in why and dims in why and f"(covered: {covered})" in why, why
+        assert why is not None and "no kernel" in why and dims in why and f"(covered: [{covered}])" in why, why
         with pytest.raises(ValueError) as err:
             op(**args)
         assert str(err.value) == why
@@ -135,14 +136,14 @@ def test_off_table_shapes(on_gfx950):
 
 
 def test_served_shapes_have_no_reason(on_gfx950):
-    assert paged.mxfp4_paged_score_topk_unsupported_reason(**paged_args()) is None
-    assert paged.mxfp4_paged_score_topk_unsupported_reason(**paged_args(seqs=64, qlen=4, blocks=2048)) is None
-    assert paged.mxfp4_paged_score_topk_unsupported_reason(**paged_args(seqs=1, qlen=1, blocks=1)) is None
-    assert prefill.mxfp4_prefill_score_unsupported_reason(**score_args()) is None
-    assert prefill.mxfp4_prefill_score_unsupported_reason(**score_args(rows=0)) is None
-    assert prefill.mxfp4_prefill_topk_unsupported_reason(**topk_args()) is None
+    assert paged.mxfp4_paged_score_topk_blocker(**paged_args()) is None
+    assert paged.mxfp4_paged_score_topk_blocker(**paged_args(seqs=64, qlen=4, blocks=2048)) is None
+    assert paged.mxfp4_paged_score_topk_blocker(**paged_args(seqs=1, qlen=1, blocks=1)) is None
+    assert prefill.mxfp4_prefill_score_blocker(**score_args()) is None
+    assert prefill.mxfp4_prefill_score_blocker(**score_args(rows=0)) is None
+    assert prefill.mxfp4_prefill_topk_blocker(**topk_args()) is None
     a = topk_args()
-    assert prefill.mxfp4_prefill_topk_unsupported_reason(**a, order=z(16, dtype=torch.int32)) is None
+    assert prefill.mxfp4_prefill_topk_blocker(**a, order=z(16, dtype=torch.int32)) is None
 
 
 def _with(args, **changes):
@@ -182,15 +183,15 @@ def test_paged_reason_branches(on_gfx950, monkeypatch):
         (_with(a, out_indices=z(2048, 12, dtype=i32).t()), "out_indices"),
     ]
     for args, want in cases:
-        why = paged.mxfp4_paged_score_topk_unsupported_reason(**args)
+        why = paged.mxfp4_paged_score_topk_blocker(**args)
         assert why is not None and why.startswith("mxfp4_paged_score_topk: ") and want in why, (want, why)
     many = paged_args(seqs=256, qlen=1)
     many["max_query_len"] = 6  # 256 sequences x 2 row tiles of 3 within 256 rows
-    monkeypatch.setattr(importlib.import_module(paged._SHAPE_HOSTS[(32, 128, 2048, 64)]).geometry, "COUNTER_GROUPS",
+    monkeypatch.setattr(importlib.import_module(paged._ROUTES.hosts[(32, 128, 2048, 64)]).geometry, "COUNTER_GROUPS",
                         511)
-    assert "row tiles" in paged.mxfp4_paged_score_topk_unsupported_reason(**many)
-    monkeypatch.setattr(paged, "available", lambda: False)
-    assert paged.mxfp4_paged_score_topk_unsupported_reason(**a) == "mxfp4_paged_score_topk: needs gfx950 with FlyDSL"
+    assert "row tiles" in paged.mxfp4_paged_score_topk_blocker(**many)
+    monkeypatch.setattr(routes, "available", lambda: False)
+    assert paged.mxfp4_paged_score_topk_blocker(**a) == "mxfp4_paged_score_topk: needs gfx950 with FlyDSL"
 
 
 def test_prefill_reason_branches(on_gfx950, monkeypatch):
@@ -215,7 +216,7 @@ def test_prefill_reason_branches(on_gfx950, monkeypatch):
         (_with(score_args(rows=8192, pages=1100)), "logits of"),
     ]
     for args, want in cases:
-        why = prefill.mxfp4_prefill_score_unsupported_reason(**args)
+        why = prefill.mxfp4_prefill_score_blocker(**args)
         assert why is not None and why.startswith("mxfp4_prefill_score: ") and want in why, (want, why)
     t = topk_args()
     cases = [
@@ -232,14 +233,14 @@ def test_prefill_reason_branches(on_gfx950, monkeypatch):
         (_with(t, ks=torch.empty(16, dtype=i32)), "GPU"),
     ]
     for args, want in cases:
-        why = prefill.mxfp4_prefill_topk_unsupported_reason(**args)
+        why = prefill.mxfp4_prefill_topk_blocker(**args)
         assert why is not None and why.startswith("mxfp4_prefill_topk: ") and want in why, (want, why)
     misaligned = torch.empty(16 * 8192 + 1, dtype=torch.float32)[1:].view(16, 8192)
-    why = prefill.mxfp4_prefill_topk_unsupported_reason(misaligned, *list(topk_args().values())[1:])
+    why = prefill.mxfp4_prefill_topk_blocker(misaligned, *list(topk_args().values())[1:])
     assert why == "mxfp4_prefill_topk: logits must be 16-byte aligned"
-    monkeypatch.setattr(prefill, "available", lambda: False)
-    assert prefill.mxfp4_prefill_score_unsupported_reason(**s) == "mxfp4_prefill_score: needs gfx950 with FlyDSL"
-    assert prefill.mxfp4_prefill_topk_unsupported_reason(**t) == "mxfp4_prefill_topk: needs gfx950 with FlyDSL"
+    monkeypatch.setattr(routes, "available", lambda: False)
+    assert prefill.mxfp4_prefill_score_blocker(**s) == "mxfp4_prefill_score: needs gfx950 with FlyDSL"
+    assert prefill.mxfp4_prefill_topk_blocker(**t) == "mxfp4_prefill_topk: needs gfx950 with FlyDSL"
 
 
 def test_import_loads_no_shape_package():
@@ -249,3 +250,12 @@ def test_import_loads_no_shape_package():
     )
     out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=300, check=True)
     assert out.stdout.strip().splitlines()[-1] == "[]", out.stdout
+
+
+@pytest.mark.parametrize("name", ["mxfp4_paged_score_topk", "mxfp4_prefill_score", "mxfp4_prefill_topk"])
+def test_renamed_aliases(on_gfx950, name):
+    alias = getattr(E, name + "_unsupported_reason")
+    assert alias.renamed_to == name + "_blocker" and alias.__name__ not in E.__all__
+    args = {"mxfp4_paged_score_topk": paged_args, "mxfp4_prefill_score": score_args,
+            "mxfp4_prefill_topk": topk_args}[name](**({"heads": 16} if name != "mxfp4_prefill_topk" else {"topk": 512}))
+    assert alias(**args) == getattr(E, name + "_blocker")(**args) is not None

@@ -11,6 +11,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+from amd_kernels import routes
 from amd_kernels.norm import attnres_rmsnorm_common as N
 from amd_kernels.norm.attnres_rmsnorm_common import host as entry
 
@@ -23,12 +24,12 @@ def meta(*shape, dtype=torch.bfloat16):
 
 @pytest.fixture
 def gfx950(monkeypatch):
-    monkeypatch.setattr(entry, "available", lambda: True)
+    monkeypatch.setattr(routes, "available", lambda: True)
 
 
 @pytest.fixture
 def comm():
-    c = object.__new__(importlib.import_module(entry._SHAPE_HOSTS[KEY]).AttnResComm)
+    c = object.__new__(importlib.import_module(entry._ROUTES.hosts[KEY]).AttnResComm)
     c.__dict__.update(bufs=[1], device=torch.device("meta"))
     return c
 
@@ -39,10 +40,10 @@ def args(m=12, h=7168, nb=8):
 
 
 def test_every_row_imports_and_exports_the_communicator():
-    for name in entry._SHAPE_HOSTS.values():
+    for name in entry._ROUTES.hosts.values():
         host = importlib.import_module(name)
         assert all(hasattr(host, a) for a in ("AttnResComm", "MAX_ROWS", "BANK_ROWS")), name
-    assert N.allreduce_attnres_rmsnorm_shapes() == frozenset(entry._SHAPE_HOSTS)
+    assert N.allreduce_attnres_rmsnorm_shapes() == frozenset(entry._ROUTES.hosts)
 
 
 def test_importing_the_entry_imports_no_shape_package():
@@ -53,28 +54,28 @@ def test_importing_the_entry_imports_no_shape_package():
 
 
 def test_reason_takes_the_method_arguments():
-    host = importlib.import_module(entry._SHAPE_HOSTS[KEY])
+    host = importlib.import_module(entry._ROUTES.hosts[KEY])
     method = list(inspect.signature(host.AttnResComm.allreduce_attnres_rmsnorm).parameters.values())[1:]
-    reason = list(inspect.signature(N.allreduce_attnres_rmsnorm_unsupported_reason).parameters.values())
+    reason = list(inspect.signature(N.allreduce_attnres_rmsnorm_blocker).parameters.values())
     assert [(p.name, p.default) for p in reason[1:]] == [(p.name, p.default) for p in method]
     factory = inspect.signature(N.attnres_comm).parameters
-    assert factory == inspect.signature(N.attnres_comm_unsupported_reason).parameters
+    assert factory == inspect.signature(N.attnres_comm_blocker).parameters
 
 
 def test_factory_key(gfx950, monkeypatch):
     monkeypatch.setattr(entry.dist, "get_world_size", lambda group: 8)
-    assert N.attnres_comm_unsupported_reason(0, None, "meta", hidden=7168) is None
-    reason = N.attnres_comm_unsupported_reason(0, None, "meta", hidden=6144)
-    assert reason == "attnres_comm: no kernel for hidden=6144, world=8 (covered: (7168, 8))"
+    assert N.attnres_comm_blocker(0, None, "meta", hidden=7168) is None
+    reason = N.attnres_comm_blocker(0, None, "meta", hidden=6144)
+    assert reason == "attnres_comm: no kernel for hidden=6144, world=8 (covered: [(7168, 8)])"
     with pytest.raises(ValueError) as e:
         N.attnres_comm(0, None, "meta", hidden=6144)
     assert str(e.value) == reason
     monkeypatch.setattr(entry.dist, "get_world_size", lambda group: 4)
-    assert "world=4" in N.attnres_comm_unsupported_reason(0, None, "meta", hidden=7168)
+    assert "world=4" in N.attnres_comm_blocker(0, None, "meta", hidden=7168)
 
 
 def test_served_calls(gfx950, comm):
-    r = N.allreduce_attnres_rmsnorm_unsupported_reason
+    r = N.allreduce_attnres_rmsnorm_blocker
     for m in (1, 256):
         assert r(comm, **args(m)) is None
         assert r(comm, **{**args(m), "prefix": None}, block_write_idx=4, out_norm_weight=meta(7168)) is None
@@ -83,7 +84,7 @@ def test_served_calls(gfx950, comm):
 
 
 def test_reasons(gfx950, comm, monkeypatch):
-    r = N.allreduce_attnres_rmsnorm_unsupported_reason
+    r = N.allreduce_attnres_rmsnorm_blocker
     want = "allreduce_attnres_rmsnorm: communicator built for hidden=7168, world=8, call is hidden=6144"
     assert r(comm, **args(h=6144)) == want
     assert "257 rows (the kernel takes 1..256)" in r(comm, **args(257))
@@ -99,8 +100,23 @@ def test_reasons(gfx950, comm, monkeypatch):
     assert "weights must be" in r(comm, **{**args(), "qk_weight": meta(7168, dtype=torch.float32)})
     assert "weights must be" in r(comm, **args(), out_norm_weight=meta(6144))
     other = SimpleNamespace(bufs=[1], device=torch.device("meta"))
-    assert "no kernel for a SimpleNamespace (covered: (7168, 8))" in r(other, **args())
+    assert "no kernel for a SimpleNamespace (covered: [(7168, 8)])" in r(other, **args())
     comm.bufs = []
     assert "closed" in r(comm, **args())
-    monkeypatch.setattr(entry, "available", lambda: False)
+    monkeypatch.setattr(routes, "available", lambda: False)
     assert r(comm, **args()) == "allreduce_attnres_rmsnorm: needs gfx950 with FlyDSL"
+
+
+def test_prepare_returns_the_reason(gfx950, monkeypatch):
+    monkeypatch.setattr(entry.dist, "get_world_size", lambda group: 8)
+    assert N.prepare_attnres_comm(0, None, "meta", hidden=6144) == N.attnres_comm_blocker(0, None, "meta",
+                                                                                          hidden=6144)
+
+
+def test_old_names_alias_the_blockers():
+    from amd_kernels.norm.attnres_rmsnorm_common import (
+        allreduce_attnres_rmsnorm_unsupported_reason,
+        attnres_comm_unsupported_reason,
+    )
+    assert allreduce_attnres_rmsnorm_unsupported_reason.renamed_to == "allreduce_attnres_rmsnorm_blocker"
+    assert attnres_comm_unsupported_reason.renamed_to == "attnres_comm_blocker"

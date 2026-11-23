@@ -5,42 +5,26 @@
 
 import dataclasses
 import functools
-import importlib
 
 import torch
 
-from .routing import available, no_kernel
+from amd_kernels import routes
+from amd_kernels.routes import Routes, renamed
 
-_SHAPE_HOSTS = {
-    (1536, 512): "amd_kernels.attention.dsa_prologue_qkv_a_norm_kv_insert_h7168.qkv_a_norm_kv_insert",
-}
-_INDEX_HOSTS = {
-    (32, 128): "amd_kernels.attention.dsa_prologue_qkv_a_norm_kv_insert_h7168.indexer_prep",
-}
-_KEY = ("q_lora", "kv_lora")
-_INDEX_KEY = ("heads", "d")
-_INSERT = "qkv_a_norm_kv_insert"
-_PREP = "indexer_prep"
-
-
-@functools.cache
-def _shape_host(key):
-    name = _SHAPE_HOSTS.get(key)
-    return importlib.import_module(name) if name is not None else None
-
-
-@functools.cache
-def _index_host(key):
-    name = _INDEX_HOSTS.get(key)
-    return importlib.import_module(name) if name is not None else None
+_ROUTES = Routes(
+    "qkv_a_norm_kv_insert",
+    {(1536, 512): "amd_kernels.attention.dsa_prologue_qkv_a_norm_kv_insert_h7168.qkv_a_norm_kv_insert"},
+    ("q_lora", "kv_lora"),
+)
+_INDEX_ROUTES = Routes("indexer_prep",
+                       {(32, 128): "amd_kernels.attention.dsa_prologue_qkv_a_norm_kv_insert_h7168.indexer_prep"},
+                       ("heads", "d"))
+_INSERT = _ROUTES.op
+_PREP = _INDEX_ROUTES.op
 
 
 def _insert_host(q_out, kv_out):
-    key = (q_out.shape[-1], kv_out.shape[-1])
-    pkg = _shape_host(key)
-    if pkg is None:
-        raise ValueError(no_kernel(_INSERT, _KEY, key, _SHAPE_HOSTS))
-    return pkg
+    return _ROUTES.package((q_out.shape[-1], kv_out.shape[-1]))
 
 
 def _package_args(pkg, qkv_a, q_norm_weight, kv_norm_weight, eps, q_out, kv_out, kv_cache=None, slot_mapping=None,
@@ -59,7 +43,7 @@ def qkv_a_norm_kv_insert(qkv_a, q_norm_weight, kv_norm_weight, eps, q_out, kv_ou
 
 
 def qkv_a_norm_kv_insert_shapes() -> frozenset:
-    return frozenset(_SHAPE_HOSTS)
+    return _ROUTES.shapes()
 
 
 def _layout(op, what):
@@ -86,17 +70,18 @@ def _bf16_vector(t, n):
     return t.dtype == torch.bfloat16 and t.is_contiguous() and t.numel() == n
 
 
-def qkv_a_norm_kv_insert_unsupported_reason(qkv_a, q_norm_weight, kv_norm_weight, eps, q_out, kv_out, kv_cache=None,
-                                            slot_mapping=None, index: dict | None = None) -> str | None:
+def qkv_a_norm_kv_insert_blocker(qkv_a, q_norm_weight, kv_norm_weight, eps, q_out, kv_out, kv_cache=None,
+                                 slot_mapping=None, index: dict | None = None) -> str | None:
     op = _INSERT
     if q_out.dim() != 2 or kv_out.dim() != 2:
         return _layout(op, "q_out, kv_out [rows, dim]")
     key = (q_out.shape[1], kv_out.shape[1])
-    if key not in _SHAPE_HOSTS:
-        return no_kernel(op, _KEY, key, _SHAPE_HOSTS)
-    if not available():
+    reason = _ROUTES.blocker(key)
+    if reason is not None:
+        return reason
+    if not routes.available():
         return f"{op}: needs gfx950 with FlyDSL"
-    pkg = _shape_host(key)
+    pkg = _ROUTES.package(key)
     k = pkg.kernel
     insert = kv_cache is not None and slot_mapping is not None
     if not pkg.supports_qkv_a_norm_kv_insert(qkv_a, kv_cache if insert else None):
@@ -152,10 +137,7 @@ def qkv_a_norm_kv_insert_kernel(*args, **kwargs):
 
 def _prep_host(q):
     key = (q.shape[1], q.shape[2]) if q.dim() == 3 else tuple(q.shape[1:])
-    pkg = _index_host(key)
-    if pkg is None:
-        raise ValueError(no_kernel(_PREP, _INDEX_KEY, key, _INDEX_HOSTS))
-    return pkg
+    return _INDEX_ROUTES.package(key)
 
 
 def indexer_prep(q, k, w, ln_weight, ln_bias, ln_eps, slot_mapping, cache, topk_out, weight_scale, q_payload, q_scales,
@@ -167,20 +149,21 @@ def indexer_prep(q, k, w, ln_weight, ln_bias, ln_eps, slot_mapping, cache, topk_
 
 
 def indexer_prep_shapes() -> frozenset:
-    return frozenset(_INDEX_HOSTS)
+    return _INDEX_ROUTES.shapes()
 
 
-def indexer_prep_unsupported_reason(q, k, w, ln_weight, ln_bias, ln_eps, slot_mapping, cache, topk_out, weight_scale,
-                                    q_payload, q_scales, weights) -> str | None:
+def indexer_prep_blocker(q, k, w, ln_weight, ln_bias, ln_eps, slot_mapping, cache, topk_out, weight_scale, q_payload,
+                         q_scales, weights) -> str | None:
     op = _PREP
     if q.dim() != 3:
         return _layout(op, "q [rows, heads, d]")
     key = (q.shape[1], q.shape[2])
-    if key not in _INDEX_HOSTS:
-        return no_kernel(op, _INDEX_KEY, key, _INDEX_HOSTS)
-    if not available():
+    reason = _INDEX_ROUTES.blocker(key)
+    if reason is not None:
+        return reason
+    if not routes.available():
         return f"{op}: needs gfx950 with FlyDSL"
-    pkg = _index_host(key)
+    pkg = _INDEX_ROUTES.package(key)
     heads, d = key
     if not pkg.supports_indexer_prep(q, cache, topk_out):
         return _layout(op, "supports_indexer_prep")
@@ -212,3 +195,8 @@ def indexer_prep_kernel(*args, **kwargs):
     """The routed ``amd_kernels.warm_up`` entry (``.entry``) for these arguments."""
     q = args[0] if args else kwargs["q"]
     return _prep_host(q).indexer_prep
+
+
+qkv_a_norm_kv_insert_unsupported_reason = renamed(qkv_a_norm_kv_insert_blocker,
+                                                  "qkv_a_norm_kv_insert_unsupported_reason")
+indexer_prep_unsupported_reason = renamed(indexer_prep_blocker, "indexer_prep_unsupported_reason")

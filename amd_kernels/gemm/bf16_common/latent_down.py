@@ -3,23 +3,18 @@
 """Latent down projection + MXFP4 quant: routes by the weight's (N, K) to the shape package's host, whose op is the
 function named like the package."""
 import functools
-import importlib
+import sys
 
 import torch
 
-from . import available
+from amd_kernels import routes
+from amd_kernels.routes import Routes, renamed
 
 OP = "bf16_latent_down_mxfp4_quant"
 _DIMS = ("n", "k")
-_SHAPE_HOSTS = {
+_ROUTES = Routes(OP, {
     (3584, 7168): "amd_kernels.gemm.bf16_latent_down_mxfp4_quant_k7168_n3584.host",
-}
-
-
-@functools.cache
-def _shape_host(key: tuple):
-    name = _SHAPE_HOSTS.get(key)
-    return importlib.import_module(name) if name is not None else None
+}, _DIMS)
 
 
 @functools.cache
@@ -28,29 +23,32 @@ def _op(host):
 
 
 def _no_kernel(key: tuple) -> str:
-    dims = ", ".join(f"{d}={v}" for d, v in zip(_DIMS, key)) if len(key) == len(_DIMS) else f"shape={key}"
-    return f"{OP}: no kernel for {dims} (covered: {sorted(_SHAPE_HOSTS)})"
+    return (_ROUTES if len(key) == len(_DIMS) else Routes(OP, _ROUTES.hosts)).blocker(key)
+
+
+def _host(key: tuple):
+    host = _ROUTES.host(key)
+    if host is None:
+        raise ValueError(_no_kernel(key))
+    return host
 
 
 def bf16_latent_down_mxfp4_quant_shapes() -> frozenset[tuple[int, int]]:
     """The covered (N, K) of the weight."""
-    return frozenset(_SHAPE_HOSTS)
+    return _ROUTES.shapes()
 
 
 def bf16_latent_down_mxfp4_quant(x: torch.Tensor, w: torch.Tensor, out: tuple | None = None, *,
                                  shuffled: bool = False, out_bf16: torch.Tensor | None = None):
     """(codes, scales) = MXFP4 of bf16(x @ W^T) from the routed package (its docstring is the contract)."""
-    host = _shape_host(tuple(w.shape))
-    if host is None:
-        raise ValueError(_no_kernel(tuple(w.shape)))
-    return _op(host)(x, w, out, shuffled=shuffled, out_bf16=out_bf16)
+    return _op(_host(tuple(w.shape)))(x, w, out, shuffled=shuffled, out_bf16=out_bf16)
 
 
 def bf16_latent_down_mxfp4_quant_weight_reason(w: torch.Tensor, bias: torch.Tensor | None = None) -> str | None:
     """None if a layer with this weight (and bias) can run the op, else why not (load time, no activations)."""
-    if not available():
+    if not routes.available():
         return f"{OP}: needs gfx950 with FlyDSL"
-    host = _shape_host(tuple(w.shape))
+    host = _ROUTES.host(tuple(w.shape))
     if host is None:
         return _no_kernel(tuple(w.shape))
     if not host.supports(w, bias):
@@ -58,9 +56,8 @@ def bf16_latent_down_mxfp4_quant_weight_reason(w: torch.Tensor, bias: torch.Tens
     return None
 
 
-def bf16_latent_down_mxfp4_quant_unsupported_reason(x: torch.Tensor, w: torch.Tensor, out: tuple | None = None, *,
-                                                    shuffled: bool = False,
-                                                    out_bf16: torch.Tensor | None = None) -> str | None:
+def bf16_latent_down_mxfp4_quant_blocker(x: torch.Tensor, w: torch.Tensor, out: tuple | None = None, *,
+                                         shuffled: bool = False, out_bf16: torch.Tensor | None = None) -> str | None:
     """None if ``bf16_latent_down_mxfp4_quant`` serves this call, else why not (host checks only)."""
     reason = bf16_latent_down_mxfp4_quant_weight_reason(w)
     if reason is not None:
@@ -85,20 +82,19 @@ def bf16_latent_down_mxfp4_quant_unsupported_reason(x: torch.Tensor, w: torch.Te
 def latent_down_xcd_local(device_index: int, on: bool, *, w: torch.Tensor) -> None:
     """Set whether the K slices of a tile exchange partials through one L2 on this device (the package probes the
     placement on its first launch; a caller running another kernel beside it turns it off)."""
-    host = _shape_host(tuple(w.shape))
-    if host is None:
-        raise ValueError(_no_kernel(tuple(w.shape)))
-    host._XCD_LOCAL[device_index] = bool(on)
+    _host(tuple(w.shape))._XCD_LOCAL[device_index] = bool(on)
 
 
 def latent_down_swap_stream_workspaces(device_index: int, stream_a: int, stream_b: int) -> None:
     """Exchange the per-stream workspaces (partial slabs, tile tickets) of two streams on a device, dict keys only:
     see ``latent_moe_common.swap_stream_workspaces``."""
-    import sys
-
-    for host in [sys.modules[n] for n in _SHAPE_HOSTS.values() if n in sys.modules]:
+    for host in [sys.modules[n] for n in _ROUTES.hosts.values() if n in sys.modules]:
         work = host._WORK
         moved = {}
         for key in [k for k in work if k[0] == device_index and k[1] in (stream_a, stream_b)]:
             moved[(key[0], stream_b if key[1] == stream_a else stream_a, *key[2:])] = work.pop(key)
         work.update(moved)
+
+
+bf16_latent_down_mxfp4_quant_unsupported_reason = renamed(bf16_latent_down_mxfp4_quant_blocker,
+                                                          "bf16_latent_down_mxfp4_quant_unsupported_reason")

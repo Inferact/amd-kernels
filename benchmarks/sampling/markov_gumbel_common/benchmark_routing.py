@@ -3,7 +3,7 @@
 """What the ``markov_gumbel_fused`` entry adds over the package's call: graph replay us (8 chains per graph, each on
 its own base logits; entry and direct graphs alternate) and host us per eager call (the enqueue loop of 20 calls, no
 synchronization inside), entry vs direct, min of 20 rounds; and the host us of
-``markov_gumbel_fused_unsupported_reason`` (the caller runs it once per call).
+``markov_gumbel_fused_blocker`` (the caller runs it once per call).
 Run: python3 benchmarks/sampling/markov_gumbel_common/benchmark_routing.py
 """
 
@@ -14,10 +14,10 @@ import torch
 
 from amd_kernels.sampling.markov_gumbel_common import (
     markov_gumbel_fused,
-    markov_gumbel_fused_unsupported_reason,
+    markov_gumbel_fused_blocker,
     markov_scratch_dwords,
 )
-from amd_kernels.sampling.markov_gumbel_common.host import _SHAPE_HOSTS
+from amd_kernels.sampling.markov_gumbel_common.host import _ROUTES
 
 V, RANK = 163840, 512
 NIN, CALLS, ROUNDS = 8, 20, 20
@@ -74,7 +74,7 @@ def host_us(fn, *args, **kw):
 
 
 def main():
-    pkg = importlib.import_module(_SHAPE_HOSTS[(V, RANK)])
+    pkg = importlib.import_module(_ROUTES.hosts[(V, RANK)])
     gen = torch.Generator().manual_seed(0)
     w1, w2 = ((torch.randn(V, RANK, generator=gen) * 0.05).bfloat16().cuda() for _ in range(2))
     print("| rows, steps | replay direct us | replay entry us | host direct us | host entry us | added us | reason us |")
@@ -82,10 +82,10 @@ def main():
     for n, k in CASES:
         kw = make(n, k, w1, w2, gen)
         bases = [(torch.randn(n, k, V, generator=gen) * 3).bfloat16().cuda() for _ in range(NIN)]
-        assert markov_gumbel_fused_unsupported_reason(bases[0], **kw) is None
+        assert markov_gumbel_fused_blocker(bases[0], **kw) is None
         rd, re = replay_us([capture(pkg.markov_gumbel_fused, bases, kw), capture(markov_gumbel_fused, bases, kw)])
         hd, he = host_us(pkg.markov_gumbel_fused, bases[0], **kw), host_us(markov_gumbel_fused, bases[0], **kw)
-        hr = host_us(markov_gumbel_fused_unsupported_reason, bases[0], **kw)
+        hr = host_us(markov_gumbel_fused_blocker, bases[0], **kw)
         print(f"| {n}, {k} | {rd:.2f} | {re:.2f} | {hd:.2f} | {he:.2f} | {he - hd:+.2f} | {hr:.2f} |")
 
 

@@ -1,51 +1,25 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the amd-kernels project
 """Shape-agnostic fused Markov draft chain: reads (vocab, rank) from ``w1`` and calls that shape's package
-(``_SHAPE_HOSTS``, imported on its first call)."""
-
-import functools
-import importlib
+(``_ROUTES``, imported on its first call)."""
 
 import torch
 
-_SHAPE_HOSTS = {
+from amd_kernels import routes
+from amd_kernels.routes import Routes, available, renamed
+
+_ROUTES = Routes("markov_gumbel_fused", {
     (163840, 512): "amd_kernels.sampling.markov_gumbel_fused_v163840_r512",
-}
-
-
-@functools.cache
-def available() -> bool:
-    """gfx950 with FlyDSL importable."""
-    if not torch.cuda.is_available() or "gfx950" not in torch.cuda.get_device_properties(0).gcnArchName:
-        return False
-    try:
-        import flydsl  # noqa: F401
-    except ImportError:
-        return False
-    return True
-
-
-@functools.cache
-def _shape_host(vocab: int, rank: int):
-    name = _SHAPE_HOSTS.get((vocab, rank))
-    return importlib.import_module(name) if name is not None else None
+}, ("vocab", "rank"))
 
 
 def _package(w1: torch.Tensor):
-    pkg = _shape_host(*w1.shape) if w1.dim() == 2 else None
-    if pkg is None:
-        raise ValueError(_no_kernel(w1))
-    return pkg
-
-
-def _no_kernel(w1: torch.Tensor) -> str:
-    return (f"markov_gumbel_fused: no kernel for (vocab, rank)={tuple(w1.shape)} "
-            f"(covered: {sorted(_SHAPE_HOSTS)})")
+    return _ROUTES.package(tuple(w1.shape))
 
 
 def markov_gumbel_fused_shapes() -> frozenset[tuple[int, int]]:
     """The (vocab, Markov rank) keys with a package."""
-    return frozenset(_SHAPE_HOSTS)
+    return _ROUTES.shapes()
 
 
 def markov_max_rows(w1: torch.Tensor) -> int:
@@ -79,16 +53,16 @@ def _int64_nk(t: torch.Tensor, n: int, k: int) -> bool:
     return t.dtype == torch.int64 and t.dim() == 2 and t.shape[0] >= n and t.shape[1] >= k and t.stride(1) == 1
 
 
-def markov_gumbel_fused_unsupported_reason(base, w1, w2, input_ids, anchor_idx, draft_tokens, idx_mapping,
-                                           sample_pos, temperature, seeds, cache, scratch,
-                                           row_mapping=None) -> str | None:
+def markov_gumbel_fused_blocker(base, w1, w2, input_ids, anchor_idx, draft_tokens, idx_mapping, sample_pos,
+                                temperature, seeds, cache, scratch, row_mapping=None) -> str | None:
     """None when ``markov_gumbel_fused`` serves this call, else why not (host checks only)."""
-    op = "markov_gumbel_fused"
-    if not available():
+    op = _ROUTES.op
+    if not routes.available():
         return f"{op}: needs gfx950 with FlyDSL"
-    pkg = _shape_host(*w1.shape) if w1.dim() == 2 else None
-    if pkg is None:
-        return _no_kernel(w1)
+    reason = _ROUTES.blocker(tuple(w1.shape))
+    if reason is not None:
+        return reason
+    pkg = _package(w1)
     vocab, rank = w1.shape
     for name, w in (("w1", w1), ("w2", w2)):
         if w.dtype != torch.bfloat16 or tuple(w.shape) != (vocab, rank) or not w.is_contiguous():
@@ -123,3 +97,6 @@ def markov_gumbel_fused_unsupported_reason(base, w1, w2, input_ids, anchor_idx, 
     return _off_device(base=base, w1=w1, w2=w2, input_ids=input_ids, anchor_idx=anchor_idx, draft_tokens=draft_tokens,
                        idx_mapping=idx_mapping, sample_pos=sample_pos, temperature=temperature, seeds=seeds,
                        cache=cache, scratch=scratch, row_mapping=row_mapping)
+
+
+markov_gumbel_fused_unsupported_reason = renamed(markov_gumbel_fused_blocker, "markov_gumbel_fused_unsupported_reason")

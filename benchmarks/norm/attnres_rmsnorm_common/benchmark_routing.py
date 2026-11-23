@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the amd-kernels project
 """What the entry adds to a call on 8 ranks: the communicator comes from ``attnres_comm`` and the call is its method,
 so graph replay and eager host time of the method (the entry's path) are set against the package function on the same
-communicator, plus the host time of ``allreduce_attnres_rmsnorm_unsupported_reason`` (what a caller runs per call to
+communicator, plus the host time of ``allreduce_attnres_rmsnorm_blocker`` (what a caller runs per call to
 decide). The pre-MLP call: prefix, 8 bank rows, 3 valid, output norm. Graph: 20 calls per graph, min of 15 rounds of 5
 replays, us per call; host: min over 50 batches of 100 calls of the time the Python call takes (no synchronize inside
 the batch), us per call; the max over ranks.
@@ -71,7 +71,7 @@ def main():
     torch.cuda.set_device(rank)
     dist.init_process_group("gloo")
     dev = torch.device("cuda", rank)
-    host = importlib.import_module(entry._SHAPE_HOSTS[(7168, 8)])
+    host = importlib.import_module(entry._ROUTES.hosts[(7168, 8)])
     comm = N.attnres_comm(rank, dist.group.WORLD, dev, hidden=7168)
     if rank == 0:
         print("| M | graph package | graph method | host package | host method | host reason |")
@@ -87,7 +87,7 @@ def main():
         method = lambda: comm.allreduce_attnres_rmsnorm(*args)
         g = [worst(v) for v in graph_us((package, method))]
         h = [worst(v) for v in host_us((package, method))]
-        reason = worst(host_us((lambda: N.allreduce_attnres_rmsnorm_unsupported_reason(comm, *args),))[0])
+        reason = worst(host_us((lambda: N.allreduce_attnres_rmsnorm_blocker(comm, *args),))[0])
         if rank == 0:
             print(f"| {m} | {g[0]:.2f} | {g[1]:.2f} | {h[0]:.2f} | {h[1]:.2f} | {reason:.2f} |", flush=True)
     torch.cuda.synchronize()

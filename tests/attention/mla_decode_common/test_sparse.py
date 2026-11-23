@@ -35,7 +35,7 @@ def case(rows, q8, given_out, seed):
 def test_equals_the_package(rows, q8, given_out):
     require_gfx950()
     args, kw = case(rows, q8, given_out, rows)
-    assert E.fp8_sparse_mla_decode_unsupported_reason(*args, **kw) is None
+    assert E.fp8_sparse_mla_decode_blocker(*args, **kw) is None
     want_a, want_kw = clone(args), clone(kw)
     want = direct(*want_a, **want_kw)
     got = E.fp8_sparse_mla_decode(*args, **kw)
@@ -55,7 +55,7 @@ def test_layout_reasons():
         ((q, cache[:, :640], indptr, slots, scale), "no kernel for heads=96, d_qk=576, record=640"),
         ((q.float(), cache, indptr, slots, scale), "operand layout (supports_fp8_sparse_mla_decode)"),
     ):
-        why = E.fp8_sparse_mla_decode_unsupported_reason(*bad)
+        why = E.fp8_sparse_mla_decode_blocker(*bad)
         assert why is not None and text in why, why
-    why = E.fp8_sparse_mla_decode_unsupported_reason(*args, out=torch.zeros((8, 96, 512), device="cuda"))
+    why = E.fp8_sparse_mla_decode_blocker(*args, out=torch.zeros((8, 96, 512), device="cuda"))
     assert "supports_fp8_sparse_mla_decode" in why, why

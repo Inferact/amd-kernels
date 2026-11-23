@@ -25,8 +25,8 @@ def chain():
     g = torch.Generator(device="cuda").manual_seed(0)
     w = (torch.randn(896, 7168, device="cuda", generator=g) * 0.02).to(torch.bfloat16)
     bias = torch.randn(896, device="cuda", generator=g) * 0.1
-    rh = importlib.import_module(router._SHAPE_HOSTS[GATE])
-    eh = importlib.import_module(experts._SHAPE_HOSTS[W13])
+    rh = importlib.import_module(router._ROUTES.hosts[GATE])
+    eh = importlib.import_module(experts._ROUTES.hosts[W13])
     ck = eh.MoeWeights.from_checkpoint(*make_checkpoint())
     return w, bias, rh, eh, E.moe_weights(ck.w13, ck.s13, ck.w2, ck.s2)
 
@@ -50,15 +50,15 @@ def test_chain_is_the_package_chain(chain, m):
     slots_d = eh.mxfp4_moe_experts(codes_d, scales_d, weights, sort_d, reduce=False).clone()
     torch.cuda.synchronize()
 
-    assert E.router_sigmoid_bias_topk_weight_reason(w, bias) is None
+    assert E.router_sigmoid_bias_topk_weight_blocker(w, bias) is None
     aux = E.router_aux(w, m, dev, zero_moe_buf=False)
-    assert E.router_sigmoid_bias_topk_unsupported_reason(x, w, bias, 1.0, aux=aux) is None
+    assert E.router_sigmoid_bias_topk_blocker(x, w, bias, 1.0, aux=aux) is None
     tw, ti = E.router_sigmoid_bias_topk(x, w, bias, 1.0, aux=aux)
-    assert E.moe_sort_from_aux_unsupported_reason(aux, weights=weights) is None
+    assert E.moe_sort_from_aux_blocker(aux, weights=weights) is None
     sort = E.moe_sort_from_aux(aux, weights=weights)
-    assert E.quantize_moe_activations_unsupported_reason(lat, weights=weights) is None
+    assert E.quantize_moe_activations_blocker(lat, weights=weights) is None
     codes, scales = E.quantize_moe_activations(lat, weights=weights)
-    assert E.mxfp4_moe_experts_unsupported_reason(codes, scales, weights, sort) is None
+    assert E.mxfp4_moe_experts_blocker(codes, scales, weights, sort) is None
     out = E.mxfp4_moe_experts(codes, scales, weights, sort)
     slots = E.mxfp4_moe_experts(codes, scales, weights, sort, reduce=False)
     torch.cuda.synchronize()
@@ -92,7 +92,7 @@ def test_router_without_sort_and_into_out(chain):
     w, bias, rh, _, _ = chain
     x = torch.randn(40, 7168, device=w.device).to(torch.bfloat16)
     out = (torch.empty(40, 16, device=w.device), torch.empty(40, 16, dtype=torch.int32, device=w.device))
-    assert E.router_sigmoid_bias_topk_unsupported_reason(x, w, bias, 2.5, out) is None
+    assert E.router_sigmoid_bias_topk_blocker(x, w, bias, 2.5, out) is None
     got = E.router_sigmoid_bias_topk(x, w, bias, 2.5, out)
     want = rh.router_sigmoid_bias_top16_e896_h7168(x, w, bias, 2.5)
     assert got[0] is out[0] and same(got[0], want[0]) and same(got[1], want[1])
@@ -108,7 +108,7 @@ def test_borrowed_workspaces(chain):
     g = torch.Generator(device=dev).manual_seed(3)
     x = (torch.randn(m, 7168, device=dev, generator=g) * 0.5).to(torch.bfloat16)
     w_down = (torch.randn(3584, 7168, device=dev, generator=g) * 0.02).to(torch.bfloat16)
-    dh = importlib.import_module(bf16_common.latent_down._SHAPE_HOSTS[(3584, 7168)])
+    dh = importlib.import_module(bf16_common.latent_down._ROUTES.hosts[(3584, 7168)])
     aux = E.router_aux(w, m, dev, zero_moe_buf=False)
 
     def run(stream):
@@ -150,7 +150,7 @@ def test_one_set_serves_eager_calls_and_replays(chain):
 
     w, bias, rh, eh, weights = chain
     dev = w.device
-    dh = importlib.import_module(bf16_common.latent_down._SHAPE_HOSTS[(3584, 7168)])
+    dh = importlib.import_module(bf16_common.latent_down._ROUTES.hosts[(3584, 7168)])
     g = torch.Generator(device=dev).manual_seed(4)
     w_down = (torch.randn(3584, 7168, device=dev, generator=g) * 0.02).to(torch.bfloat16)
     plan = [(48, True), (8, False), (16, True), (48, False), (48, True), (100, False), (16, False), (16, True),

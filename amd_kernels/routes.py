@@ -46,7 +46,7 @@ class Routes:
         return frozenset(self.hosts)
 
     def describe(self, key) -> str:
-        if self.names is None:
+        if self.names is None or not isinstance(key, tuple):
             return str(key)
         return ", ".join(f"{n}={v}" for n, v in zip(self.names, key))
 
@@ -76,7 +76,8 @@ class Routes:
         """The key whose shape package defines ``cls`` (the type of an object an entry built), or None."""
         mod = cls.__module__
         for key, name in self.hosts.items():
-            if mod == name or mod.startswith(name + "."):
+            root = name.removesuffix(".host")
+            if mod == root or mod.startswith(root + "."):
                 return key
         return None
 
@@ -144,22 +145,31 @@ def renamed(fn, old: str):
     return alias
 
 
-def integer_form(legacy):
-    """Let a blocker that now takes its op's arguments also answer a call in its previous integer form (the first
-    argument an int), through ``legacy``, warning once per process."""
+def _leading_int(args, kwargs) -> bool:
+    return bool(args) and type(args[0]) is int
+
+
+def previous_form(legacy, when=_leading_int):
+    """Let a blocker that now takes its op's arguments also answer a call in its previous form (``when(args,
+    kwargs)``, by default a leading int), through ``legacy``, warning once per process."""
 
     def wrap(fn):
         @functools.wraps(fn)
         def blocker(*args, **kwargs):
-            if args and type(args[0]) is int:
-                _warn_once(f"amd_kernels: {fn.__name__} takes its op's arguments; the integer form is deprecated")
+            if when(args, kwargs):
+                _warn_once(f"amd_kernels: {fn.__name__} takes its op's arguments; the previous form is deprecated")
                 return legacy(*args, **kwargs)
             return fn(*args, **kwargs)
 
-        blocker.integer_form = legacy
+        blocker.previous_form = legacy
         return blocker
 
     return wrap
+
+
+def arity(n: int):
+    """``when`` for ``previous_form``: the call has exactly ``n`` positional arguments and no keywords."""
+    return lambda args, kwargs: len(args) == n and not kwargs
 
 
 @functools.cache

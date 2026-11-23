@@ -8,7 +8,7 @@ reads its key from its operands (or, for an 8-rank op, from the communicator it 
 package serving that key on the first call and passes the arguments through unchanged: outputs, numerics and
 determinism are the shape package's (its `reference.py`). The 8-rank communicators are built by factories that take
 the key dims as keywords and the world size from the group. Off the covered keys an op raises `ValueError` with the
-"no kernel for" reason; `<op>_unsupported_reason` returns that reason, or any other one-line reason the package would
+"no kernel for" reason; `<op>_blocker` returns that reason, or any other one-line reason the package would
 reject the call for (layout, dtype, row count, communicator), or None, so a caller can fall back instead. Reasons are
 host-only (no device read, no allocation) and safe inside graph capture.
 
@@ -18,25 +18,28 @@ host-only (no device read, no allocation) and safe inside graph capture.
 - `qkv_a_norm_kv_insert`: the q_a / kv_a RMSNorms and the fp8_ds_mla KV insert of a layer; `index` (a dict of the
   package's `IndexSide` fields) adds the indexer's key insert and head weights.
 - `indexer_prep`: the indexer query's MXFP4 quant and top-k reset (with the key: its insert and the head weights).
-- `q_gather_comm`: the query gather's 8-rank communicator (a collective, built before capture, `.close()` after).
+- `q_gather_comm`: the query gather's 8-rank communicator (a collective, built before capture, `.close()` after);
+  `prepare_q_gather_comm`: the communicator or the reason it is not built.
 - `pack_q_b`, `pack_w_uk`: load-time packing of q_b and W_UK for `q_bproj_wuk_gather`.
 - `q_bproj_wuk_gather`: q_b + W_UK + all-gather: the latent query of all heads on every rank (bf16 and / or q8).
 - `fp8_sparse_mla_decode`: a DSA layer's sparse MLA decode at DCP, `(out, lse)`.
-- `lse_combine_comm`, `prepare_w_uv`: the combine's 8-rank communicator and its load-time W_UV layout.
+- `lse_combine_comm` (`prepare_lse_combine_comm`), `prepare_w_uv`: the combine's 8-rank communicator and its
+  load-time W_UV layout.
 - `lse_combine_vup`: the DCP LSE combine + W_UV up-projection (+ output gate) of this rank's heads.
 - `fp8_dense_mla_decode`: the draft layers' dense fp8 MLA decode over a round-robin context shard, `(out, lse)`.
-- `<op>_unsupported_reason` (the op's arguments), `<factory>_unsupported_reason`: None or why the call is not served.
+- `<op>_blocker` (the op's arguments), `<factory>_blocker`: None or why the call is not served.
 - `<op>_shapes`: the covered keys, for a decision made before any operand exists (layer load, warm-up plan).
 - `<op>_kernel` (all ops but the dense decode): the routed `amd_kernels.warm_up` entry, to compile without launching.
 
-Dispatch: `_SHAPE_HOSTS` of each module (`prologue.py`, `query.py`, `sparse.py`, `combine.py`, `dense.py`).
+Dispatch: `_ROUTES` (`amd_kernels.routes.Routes`) of each module (`prologue.py`, `query.py`, `sparse.py`,
+`combine.py`, `dense.py`).
 
 ## Performance
 
 The entry adds only the dispatch: a graph holds the routed package's launches, nothing else. Graph replay of 20
 calls (same operands), us per call, min of 30 replays alternating entry / direct; one MI355X, 8 for the 8-rank ops (max
 over ranks). Host: Python the entry adds per eager call (the routed function replaced by a no-op) and one
-`<op>_unsupported_reason` call, min of 15 x 2000 calls.
+`<op>_blocker` call, min of 15 x 2000 calls.
 
 | op, shape | direct us | entry us | added us | host: dispatch added us | host: reason us |
 |---|---|---|---|---|---|

@@ -39,7 +39,7 @@ DECODE = [(1, 1, True), (256, 1, True), (8, 8, True), (256, 8, True), (13, 6, Fa
 def test_decode(rows, tokens, uniform):
     require_gfx950()
     _, a = cases.decode(rows, tokens, uniform)
-    assert E.kda_decode_fb_gate_spec_unsupported_reason(**a, uniform=uniform) is None
+    assert E.kda_decode_fb_gate_spec_blocker(**a, uniform=uniform) is None
     same_bits(lambda: cases.decode(rows, tokens, uniform))
 
 
@@ -58,7 +58,7 @@ PREFILL_IDS = ["1_mega", "3600_mega", "64_staged", "10240_staged", "ragged4", "c
 def test_prefill(seq, impl, ck):
     require_gfx950()
     _, (args, kw) = cases.prefill(seq, impl, ck)
-    assert E.kda_prefill_unsupported_reason(*args, **kw) is None
+    assert E.kda_prefill_blocker(*args, **kw) is None
     same_bits(lambda: cases.prefill(seq, impl, ck))
 
 
@@ -70,8 +70,8 @@ MONO = [(4, 4, -1, True), (16, 4, -1, True), (16, 8, -1, True), (12, 6, 4, False
 def test_mono(S, L, write_idx, delta):
     require_gfx950()
     _, (ws, args, kw) = cases.mono(S, L, write_idx=write_idx, delta=delta)
-    assert E.kda_mono_workspace_unsupported_reason("cuda", hidden=7168, heads=12, head_dim=128) is None
-    assert E.kda_mono_decode_unsupported_reason(ws[True], 0, *args, **kw) is None
+    assert E.kda_mono_workspace_blocker("cuda", hidden=7168, heads=12, head_dim=128) is None
+    assert E.kda_mono_decode_blocker(ws[True], 0, *args, **kw) is None
     a, (wa, _, _) = cases.mono(S, L, write_idx=write_idx, delta=delta)
     b, (wb, _, _) = cases.mono(S, L, write_idx=write_idx, delta=delta)
     a.run(True)

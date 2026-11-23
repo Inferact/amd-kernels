@@ -11,19 +11,19 @@ A call no package serves gets a one-line reason and the caller runs its own loop
 ## Entry points
 - `markov_gumbel_common.markov_gumbel_fused`: the chain; the routed package's function, which warms itself up on its
   first call of a step count.
-- `markov_gumbel_common.markov_gumbel_fused_unsupported_reason`: None when `markov_gumbel_fused` serves these
+- `markov_gumbel_common.markov_gumbel_fused_blocker`: None when `markov_gumbel_fused` serves these
   arguments, else why not (host checks only, safe inside graph capture); the caller asks once per call.
 - `markov_gumbel_common.markov_max_rows`, `markov_gumbel_common.markov_scratch_dwords`: the row limit and the int32
   scratch size of `w1`'s package, to size the scratch (zeroed once, then owned by the kernel) at load time.
 - `markov_gumbel_common.markov_gumbel_fused_shapes`: the covered (V, R) keys, for a caller deciding at load time.
 - `markov_gumbel_common.available`: gfx950 with FlyDSL importable.
 
-Dispatch: `host._SHAPE_HOSTS` maps (V, R) to the package, imported on its first call.
+Dispatch: `host._ROUTES` (`amd_kernels.routes.Routes`) maps (V, R) to the package, imported on its first call.
 
 ## Performance
 The entry adds the dispatch only: a graph holds the package's kernel, the eager call one dict lookup. One MI355X,
 min of 20 rounds; graph replay of 8 chains on their own base logits, T 1.0; host us per eager call from a 20-call
-enqueue loop; reason = `markov_gumbel_fused_unsupported_reason`.
+enqueue loop; reason = `markov_gumbel_fused_blocker`.
 
 | rows, steps | replay direct us | replay entry us | host direct us | host entry us | added us | reason us |
 |---|---|---|---|---|---|---|

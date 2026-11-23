@@ -19,13 +19,14 @@ weight with it; it is host-only and takes the method's arguments.
 
 - `available`: gfx950 with FlyDSL importable.
 - `logits_gemm_exchange_shapes`: the covered (N, K, world), the load-time check of an lm_head shard.
-- `logits_exchange_comm`, `logits_exchange_comm_unsupported_reason`: the collective communicator, a `LogitsExchange`
-  (two receive buffers, or one when every rank reads an exchange before any issues the next).
+- `logits_exchange_comm`, `logits_exchange_comm_blocker`, `prepare_logits_exchange_comm`: the collective
+  communicator, a `LogitsExchange` (two receive buffers, or one when every rank reads an exchange before any issues
+  the next), and the communicator or the reason it cannot be built.
 - `LogitsExchange.gemm_exchange`, `.recv`, `.warmup`, `.close`: the call the model makes, the in-place rows, the
   collective compile before capture and the collective teardown.
-- `logits_gemm_exchange_unsupported_reason`: whether `comm.gemm_exchange(...)` with these arguments is served.
+- `logits_gemm_exchange_blocker`: whether `comm.gemm_exchange(...)` with these arguments is served.
 
-Dispatch: `host._SHAPE_HOSTS` and `host._GEMMS` ((N, K, world) -> the exchange host, the GEMM host and op and the
+Dispatch: `host._ROUTES` and `host._GEMMS` ((N, K, world) -> the exchange host, the GEMM host and op and the
 push crossovers).
 
 ## Performance

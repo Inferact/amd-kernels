@@ -13,19 +13,20 @@ keeps its own embedding; every rank must get the same answer (the factory is col
 ## Entry points
 - `vocab_gather_common.vocab_gather_comm`: builds the gather (every rank, same order, after the weights load,
   before graph capture).
-- `vocab_gather_common.vocab_gather_comm_unsupported_reason`: None when `vocab_gather_comm` serves this shard,
-  rank and group, else why not (host checks only, no collective).
-- `vocab_gather_common.vocab_gather_unsupported_reason`: None when a built gather serves these ids (1-D contiguous
+- `vocab_gather_common.vocab_gather_comm_blocker`: None when `vocab_gather_comm` serves this shard, rank and group,
+  else why not (host checks only, no collective).
+- `vocab_gather_common.prepare_vocab_gather_comm`: the gather, or the reason it cannot be built.
+- `vocab_gather_common.vocab_gather_blocker`: None when a built gather serves these ids (1-D contiguous
   int32 / int64 on the shard's device), else why not; the caller asks once per call.
 - `vocab_gather_common.vocab_gather_shapes`: the covered (H, world) keys, for a caller deciding at load time.
 - `vocab_gather_common.available`: gfx950 with FlyDSL importable.
 
-Dispatch: `host._SHAPE_HOSTS` maps (H, world) to the package, imported on first use.
+Dispatch: `host._ROUTES` maps (H, world) to the package, imported on first use.
 
 ## Performance
 The entry adds nothing per lookup: the gather is the package's object. 8 MI355X, hidden 7168, 20480 rows a shard,
 random ids, min of 20 rounds, the maximum over ranks; graph replay of 20 lookups on their own ids; host us per eager
-call from a 100-call enqueue loop; reason = `vocab_gather_unsupported_reason`.
+call from a 100-call enqueue loop; reason = `vocab_gather_blocker`.
 
 | tokens | replay direct us | replay entry us | host direct us | host entry us | added us | reason us |
 |---|---|---|---|---|---|---|

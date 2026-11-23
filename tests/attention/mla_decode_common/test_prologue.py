@@ -65,7 +65,7 @@ def prep_args(n, keys, gen):
 def test_insert_equals_the_package(n, form):
     require_gfx950()
     args = insert_args(n, form, torch.Generator().manual_seed(n))
-    assert E.qkv_a_norm_kv_insert_unsupported_reason(*args) is None
+    assert E.qkv_a_norm_kv_insert_blocker(*args) is None
     want = clone(args)
     if want[8] is not None:
         want[8] = IndexSide(**want[8])
@@ -85,7 +85,7 @@ def test_insert_equals_the_package(n, form):
 def test_prep_equals_the_package(n, keys):
     require_gfx950()
     args = prep_args(n, keys, torch.Generator().manual_seed(100 + n))
-    assert E.indexer_prep_unsupported_reason(*args) is None
+    assert E.indexer_prep_blocker(*args) is None
     want = clone(args)
     direct_prep(*want)
     E.indexer_prep(*args)
@@ -125,7 +125,7 @@ INSERT_BRANCHES = [
 def test_insert_reasons(i, make, text):
     require_gfx950()
     args = insert_args(4, "index", torch.Generator().manual_seed(0))
-    why = E.qkv_a_norm_kv_insert_unsupported_reason(*with_(args, i, make(args)))
+    why = E.qkv_a_norm_kv_insert_blocker(*with_(args, i, make(args)))
     assert why is not None and why.startswith("qkv_a_norm_kv_insert: ") and text in why, why
 
 
@@ -151,5 +151,5 @@ PREP_BRANCHES = [
 def test_prep_reasons(i, make, text):
     require_gfx950()
     args = prep_args(4, True, torch.Generator().manual_seed(0))
-    why = E.indexer_prep_unsupported_reason(*with_(args, i, make(args)))
+    why = E.indexer_prep_blocker(*with_(args, i, make(args)))
     assert why is not None and why.startswith("indexer_prep: ") and text in why, why

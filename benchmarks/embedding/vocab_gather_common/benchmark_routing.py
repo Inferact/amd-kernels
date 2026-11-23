@@ -4,7 +4,7 @@
 returns the package's ``VocabGather``, so a lookup runs the package's code. Graph replay us (20 lookups per graph,
 each on its own ids; entry-built and directly built gathers alternate) and host us per eager call (the enqueue loop
 of 100 calls, no synchronization inside), min of 20 rounds, the maximum over ranks; and the host us of
-``vocab_gather_unsupported_reason`` (the caller runs it once per call).
+``vocab_gather_blocker`` (the caller runs it once per call).
 Run: python3 benchmarks/embedding/vocab_gather_common/benchmark_routing.py
 """
 
@@ -24,13 +24,13 @@ MS = (1, 128, 2048)
 def worker(rank, port):
     torch.cuda.set_device(rank)
     dist.init_process_group("gloo", init_method=f"tcp://127.0.0.1:{port}", rank=rank, world_size=RANKS)
-    from amd_kernels.embedding.vocab_gather_common import vocab_gather_comm, vocab_gather_unsupported_reason
-    from amd_kernels.embedding.vocab_gather_common.host import _SHAPE_HOSTS
+    from amd_kernels.embedding.vocab_gather_common import vocab_gather_blocker, vocab_gather_comm
+    from amd_kernels.embedding.vocab_gather_common.host import _ROUTES
 
     group = dist.group.WORLD
     dev = torch.device("cuda", rank)
     weight = torch.randn(VR, H, device=dev, dtype=torch.bfloat16)
-    pkg = importlib.import_module(_SHAPE_HOSTS[(H, RANKS)])
+    pkg = importlib.import_module(_ROUTES.hosts[(H, RANKS)])
     gathers = [pkg.VocabGather(weight, rank, group), vocab_gather_comm(weight, rank, group)]
     for g in gathers:
         g.warm_up()
@@ -79,10 +79,10 @@ def worker(rank, port):
     gen = torch.Generator(device=dev).manual_seed(5)
     for m in MS:
         inputs = [torch.randint(0, RANKS * VR, (m,), device=dev, generator=gen) for _ in range(NIN)]
-        assert vocab_gather_unsupported_reason(gathers[1], inputs[0]) is None
+        assert vocab_gather_blocker(gathers[1], inputs[0]) is None
         rd, re = replay_us(inputs)
         hd, he = (host_us(g, inputs[0]) for g in gathers)
-        hr = host_us(vocab_gather_unsupported_reason, gathers[1], inputs[0])
+        hr = host_us(vocab_gather_blocker, gathers[1], inputs[0])
         if rank == 0:
             print(f"| {m} | {rd:.2f} | {re:.2f} | {hd:.2f} | {he:.2f} | {he - hd:+.2f} | {hr:.2f} |")
     for g in gathers:

@@ -79,7 +79,7 @@ def run(rank, port):
 
     group, dev = dist.group.WORLD, torch.device("cuda", rank)
     comm = host.topk_gather_merge_comm(rank, group, dev, topk=K)
-    direct = importlib.import_module(host._SHAPE_HOSTS[(K, WORLD)]).TopkGatherMerge(rank, group, dev)
+    direct = importlib.import_module(host._ROUTES.hosts[(K, WORLD)]).TopkGatherMerge(rank, group, dev)
     comm.warmup()
     direct.warmup()
     if rank == 0:
@@ -91,7 +91,7 @@ def run(rank, port):
             for name, c in (("direct", direct), ("entry", comm)):
                 t[name].append(time_graph(lambda *s, c=c: c(*s, PAGE, STRIDE), sets, group))
         d, e = min(t["direct"]), min(t["entry"])
-        reason = host_us(lambda s=sets[0]: host.topk_gather_merge_unsupported_reason(comm, *s, PAGE, STRIDE))
+        reason = host_us(lambda s=sets[0]: host.topk_gather_merge_blocker(comm, *s, PAGE, STRIDE))
         if rank == 0:
             print(f"| {rows} | {d:.2f} | {e:.2f} | {e - d:+.2f} | {reason:.2f} |", flush=True)
         del sets

@@ -11,9 +11,9 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+from amd_kernels import routes
 from amd_kernels.moe import latent_moe_common as E
 from amd_kernels.moe.latent_moe_common import (
-    dispatch,
     experts,
     latent_tail,
     layer_tail,
@@ -30,16 +30,16 @@ ROUTED = {
     layer_tail: ("LayerTailRunner", "K2Build", "k2_launch", "SERVED_ROWS"),
 }
 PAIRS = [
-    (E.router_sigmoid_bias_topk, E.router_sigmoid_bias_topk_unsupported_reason),
-    (E.mxfp4_moe_experts, E.mxfp4_moe_experts_unsupported_reason),
-    (E.moe_weights, E.moe_weights_unsupported_reason),
-    (E.moe_sort_from_aux, E.moe_sort_from_aux_unsupported_reason),
-    (E.quantize_moe_activations, E.quantize_moe_activations_unsupported_reason),
-    (E.latent_tail_comm, E.latent_tail_comm_unsupported_reason),
-    (E.allreduce_latent_rmsnorm_up_proj, E.allreduce_latent_rmsnorm_up_proj_unsupported_reason),
-    (E.allreduce_slots_rmsnorm_up_proj, E.allreduce_slots_rmsnorm_up_proj_unsupported_reason),
-    (E.layer_tail_runner, E.layer_tail_runner_unsupported_reason),
-    (E.layer_tail_launch, E.layer_tail_launch_unsupported_reason),
+    (E.router_sigmoid_bias_topk, E.router_sigmoid_bias_topk_blocker),
+    (E.mxfp4_moe_experts, E.mxfp4_moe_experts_blocker),
+    (E.moe_weights, E.moe_weights_blocker),
+    (E.moe_sort_from_aux, E.moe_sort_from_aux_blocker),
+    (E.quantize_moe_activations, E.quantize_moe_activations_blocker),
+    (E.latent_tail_comm, E.latent_tail_comm_blocker),
+    (E.allreduce_latent_rmsnorm_up_proj, E.allreduce_latent_rmsnorm_up_proj_blocker),
+    (E.allreduce_slots_rmsnorm_up_proj, E.allreduce_slots_rmsnorm_up_proj_blocker),
+    (E.layer_tail_runner, E.layer_tail_runner_blocker),
+    (E.layer_tail_launch, E.layer_tail_launch_blocker),
 ]
 
 
@@ -49,22 +49,22 @@ def meta(*shape, dtype=bf):
 
 @pytest.fixture
 def gfx950(monkeypatch):
-    monkeypatch.setattr(dispatch, "available", lambda: True)
+    monkeypatch.setattr(routes, "available", lambda: True)
 
 
 @pytest.mark.parametrize("module", list(ROUTED), ids=lambda m: m.__name__.rsplit(".", 1)[1])
 def test_every_row_imports_and_exports_the_routed_names(module):
-    for name in module._SHAPE_HOSTS.values():
+    for name in module._ROUTES.hosts.values():
         host = importlib.import_module(name)
         assert all(hasattr(host, a) for a in ROUTED[module]), name
 
 
 def test_shapes_are_the_tables():
-    assert E.router_sigmoid_bias_topk_shapes() == frozenset(router._SHAPE_HOSTS)
-    assert E.mxfp4_moe_experts_shapes() == frozenset(experts._SHAPE_HOSTS)
-    assert E.allreduce_latent_rmsnorm_up_proj_shapes() == frozenset(latent_tail._SHAPE_HOSTS)
-    assert E.allreduce_slots_rmsnorm_up_proj_shapes() == frozenset(latent_tail._SHAPE_HOSTS)
-    assert E.layer_tail_launch_shapes() == frozenset(layer_tail._SHAPE_HOSTS)
+    assert E.router_sigmoid_bias_topk_shapes() == frozenset(router._ROUTES.hosts)
+    assert E.mxfp4_moe_experts_shapes() == frozenset(experts._ROUTES.hosts)
+    assert E.allreduce_latent_rmsnorm_up_proj_shapes() == frozenset(latent_tail._ROUTES.hosts)
+    assert E.allreduce_slots_rmsnorm_up_proj_shapes() == frozenset(latent_tail._ROUTES.hosts)
+    assert E.layer_tail_launch_shapes() == frozenset(layer_tail._ROUTES.hosts)
 
 
 def test_importing_the_entries_imports_no_shape_package():
@@ -80,11 +80,11 @@ def test_reason_takes_the_op_arguments(op, reason):
 
 
 def test_off_gfx950_every_reason_says_so(monkeypatch):
-    monkeypatch.setattr(dispatch, "available", lambda: False)
+    monkeypatch.setattr(routes, "available", lambda: False)
     w = meta(896, 7168)
-    assert E.router_sigmoid_bias_topk_weight_reason(w).endswith("needs gfx950 with FlyDSL")
-    assert "needs gfx950" in E.moe_weights_unsupported_reason(meta(896, 768, 1792, dtype=u8), w, w, w)
-    assert "needs gfx950" in E.layer_tail_launch_unsupported_reason(None, {}, **{k: None for k in LAUNCH_KW})
+    assert E.router_sigmoid_bias_topk_weight_blocker(w).endswith("needs gfx950 with FlyDSL")
+    assert "needs gfx950" in E.moe_weights_blocker(meta(896, 768, 1792, dtype=u8), w, w, w)
+    assert "needs gfx950" in E.layer_tail_launch_blocker(None, {}, **{k: None for k in LAUNCH_KW})
 
 
 # router
@@ -95,19 +95,19 @@ def router_args(m=12, e=896, h=7168, **kw):
 
 
 def test_router_routes_by_gate_shape_and_topk(gfx950):
-    host = router._host(meta(896, 7168), 16)
-    assert host.__name__ == router._SHAPE_HOSTS[(896, 7168, 16)]
+    host = router._ROUTES.package((896, 7168, 16))
+    assert host.__name__ == router._ROUTES.hosts[(896, 7168, 16)]
     for m in (1, 192):
         aux = E.router_aux(meta(896, 7168), m, torch.device("meta"))
-        assert E.router_sigmoid_bias_topk_unsupported_reason(**router_args(m), aux=aux) is None
-        assert E.router_sigmoid_bias_topk_unsupported_reason(**router_args(m)) is None
+        assert E.router_sigmoid_bias_topk_blocker(**router_args(m), aux=aux) is None
+        assert E.router_sigmoid_bias_topk_blocker(**router_args(m)) is None
 
 
 @pytest.mark.parametrize("kw", [dict(e=384), dict(h=6144), dict(topk=8)])
 def test_router_off_table(gfx950, kw):
     topk = kw.pop("topk", 16)
     args = router_args(**kw)
-    reason = E.router_sigmoid_bias_topk_unsupported_reason(**args, topk=topk)
+    reason = E.router_sigmoid_bias_topk_blocker(**args, topk=topk)
     assert "no kernel for" in reason and "(896, 7168, 16)" in reason
     with pytest.raises(ValueError) as e:
         E.router_sigmoid_bias_topk(**args, topk=topk)
@@ -115,11 +115,11 @@ def test_router_off_table(gfx950, kw):
 
 
 def test_router_reasons(gfx950):
-    r = E.router_sigmoid_bias_topk_unsupported_reason
+    r = E.router_sigmoid_bias_topk_blocker
     w = meta(896, 7168)
-    assert "operand layout" in E.router_sigmoid_bias_topk_weight_reason(meta(896, 7168, dtype=f32))
-    assert "operand layout" in E.router_sigmoid_bias_topk_weight_reason(w, meta(896, dtype=bf))
-    assert E.router_sigmoid_bias_topk_weight_reason(w) is None
+    assert "operand layout" in E.router_sigmoid_bias_topk_weight_blocker(meta(896, 7168, dtype=f32))
+    assert "operand layout" in E.router_sigmoid_bias_topk_weight_blocker(w, meta(896, dtype=bf))
+    assert E.router_sigmoid_bias_topk_weight_blocker(w) is None
     assert "correction bias" in r(meta(4, 7168), w, None)
     assert "193 rows" in r(**router_args(193))
     assert "0 rows" in r(**router_args(0))
@@ -150,29 +150,29 @@ def sort_of(m, w):
 
 def test_experts_route_by_w13(gfx950):
     w = weights()
-    assert experts._host(w.w13, "op").__name__ == experts._SHAPE_HOSTS[(896, 768, 1792)]
-    assert E.moe_weights_unsupported_reason(w.w13, w.s13, w.w2, w.s2) is None
+    assert experts._ROUTES.package(tuple(w.w13.shape)).__name__ == experts._ROUTES.hosts[(896, 768, 1792)]
+    assert E.moe_weights_blocker(w.w13, w.s13, w.w2, w.s2) is None
     for m in (1, 192):
         aux = E.router_aux(meta(896, 7168), m, torch.device("meta"))
-        assert E.moe_sort_from_aux_unsupported_reason(aux, weights=w) is None
+        assert E.moe_sort_from_aux_blocker(aux, weights=w) is None
         args = (meta(m, 1792, dtype=u8), meta(m, 112, dtype=u8), w, E.moe_sort_from_aux(aux, weights=w))
-        assert E.mxfp4_moe_experts_unsupported_reason(*args) is None
-        assert E.mxfp4_moe_experts_unsupported_reason(*args, out=meta(m, 3584)) is None
-        assert E.quantize_moe_activations_unsupported_reason(meta(m, 3584), weights=w) is None
-    host = importlib.import_module(experts._SHAPE_HOSTS[(896, 768, 1792)])
+        assert E.mxfp4_moe_experts_blocker(*args) is None
+        assert E.mxfp4_moe_experts_blocker(*args, out=meta(m, 3584)) is None
+        assert E.quantize_moe_activations_blocker(meta(m, 3584), weights=w) is None
+    host = importlib.import_module(experts._ROUTES.hosts[(896, 768, 1792)])
     assert E.moe_sort_capacity(12, weights=w) == host.sort_capacity(12)
 
 
 def test_experts_off_table(gfx950):
     args = (meta(128, 768, 1792, dtype=u8), meta(128 * 768, 112, dtype=u8), meta(128, 3584, 192, dtype=u8),
             meta(128 * 3584, 16, dtype=u8))
-    reason = E.moe_weights_unsupported_reason(*args)
+    reason = E.moe_weights_blocker(*args)
     assert "no kernel for E=128, 2I=768, H/2=1792" in reason and "(896, 768, 1792)" in reason
     with pytest.raises(ValueError) as e:
         E.moe_weights(*args)
     assert str(e.value) == reason
     fake = SimpleNamespace(w13=meta(128, 768, 1792, dtype=u8))
-    reason = E.mxfp4_moe_experts_unsupported_reason(meta(4, 1792, dtype=u8), meta(4, 112, dtype=u8), fake, None)
+    reason = E.mxfp4_moe_experts_blocker(meta(4, 1792, dtype=u8), meta(4, 112, dtype=u8), fake, None)
     assert "no kernel for" in reason
     with pytest.raises(ValueError, match="no kernel for"):
         E.mxfp4_moe_experts(meta(4, 1792, dtype=u8), meta(4, 112, dtype=u8), fake, None)
@@ -180,9 +180,9 @@ def test_experts_off_table(gfx950):
 
 def test_experts_reasons(gfx950):
     w = weights()
-    assert "operand layout" in E.moe_weights_unsupported_reason(w.w13, w.s13, w.w2, meta(896 * 3584, 12, dtype=u8))
-    assert "operand layout" in E.moe_weights_unsupported_reason(w.w13, meta(896 * 768, 56, dtype=bf), w.w2, w.s2)
-    r = E.mxfp4_moe_experts_unsupported_reason
+    assert "operand layout" in E.moe_weights_blocker(w.w13, w.s13, w.w2, meta(896 * 3584, 12, dtype=u8))
+    assert "operand layout" in E.moe_weights_blocker(w.w13, meta(896 * 768, 56, dtype=bf), w.w2, w.s2)
+    r = E.mxfp4_moe_experts_blocker
     sort = sort_of(12, w)
     codes, scales = meta(12, 1792, dtype=u8), meta(12, 112, dtype=u8)
     fake = SimpleNamespace(w13=w.w13, s13=w.s13, w2=w.w2, s2=w.s2)
@@ -194,7 +194,7 @@ def test_experts_reasons(gfx950):
     assert "smaller than the sort" in r(meta(40, 1792, dtype=u8), meta(40, 112, dtype=u8), w, sort)
     assert "out must be" in r(codes, scales, w, sort, meta(12, 3584, dtype=f32))
     assert r(codes, scales, w, sort, meta(12, 3584, dtype=f32), reduce=False) is None
-    q = E.quantize_moe_activations_unsupported_reason
+    q = E.quantize_moe_activations_blocker
     assert "x must be" in q(meta(12, 7168), weights=w)
     assert "codes / scales" in q(meta(12, 3584), meta(12, 1792, dtype=u8), meta(6, 112, dtype=u8), weights=w)
     assert "together" in q(meta(12, 3584), meta(12, 1792, dtype=u8), weights=w)
@@ -206,7 +206,7 @@ def test_experts_reasons(gfx950):
 def test_aux_hand_off_mismatch(gfx950):
     w = weights()
     aux = E.router_aux(meta(896, 7168), 12, torch.device("meta"))
-    s = E.moe_sort_from_aux_unsupported_reason
+    s = E.moe_sort_from_aux_blocker
     assert "not a top-16 sort" in s({**aux, "reverse_sorted": meta(12 * 8, dtype=i32)}, weights=w)
     assert "not a top-16 sort" in s({**aux, "moe_buf": meta(12, 7168)}, weights=w)
     assert "not a top-16 sort" in s({**aux, "sorted_token_ids": meta(64, dtype=i32)}, weights=w)
@@ -231,21 +231,21 @@ def tail_args(m=12, n=896, k=3584):
 
 @pytest.fixture
 def comm():
-    return fake_comm(latent_tail._SHAPE_HOSTS[(896, 3584, 8)], "LatentTailComm")
+    return fake_comm(latent_tail._ROUTES.hosts[(896, 3584, 8)], "LatentTailComm")
 
 
 def test_latent_tail_routes_by_comm(gfx950, comm, monkeypatch):
     for m in (1, 256):
-        assert E.allreduce_latent_rmsnorm_up_proj_unsupported_reason(comm, **tail_args(m)) is None
+        assert E.allreduce_latent_rmsnorm_up_proj_blocker(comm, **tail_args(m)) is None
     for m in (1, 64):
-        assert E.allreduce_slots_rmsnorm_up_proj_unsupported_reason(
+        assert E.allreduce_slots_rmsnorm_up_proj_blocker(
             comm, meta(200, 3584), meta(m * 16, dtype=i32), meta(3584), meta(896, 3584), meta(m, 896)) is None
     shared = meta(12, 7168)[:, 896:1792]
-    assert E.allreduce_latent_rmsnorm_up_proj_unsupported_reason(comm, **{**tail_args(), "shared": shared}) is None
+    assert E.allreduce_latent_rmsnorm_up_proj_blocker(comm, **{**tail_args(), "shared": shared}) is None
     monkeypatch.setattr(latent_tail.dist, "get_world_size", lambda group: 8)
-    assert E.latent_tail_comm_unsupported_reason(0, None, "meta", up_rows=896, latent=3584) is None
+    assert E.latent_tail_comm_blocker(0, None, "meta", up_rows=896, latent=3584) is None
     monkeypatch.setattr(latent_tail.dist, "get_world_size", lambda group: 4)
-    reason = E.latent_tail_comm_unsupported_reason(0, None, "meta", up_rows=896, latent=3584)
+    reason = E.latent_tail_comm_blocker(0, None, "meta", up_rows=896, latent=3584)
     assert "no kernel for up_rows=896, latent=3584, world=4" in reason
     with pytest.raises(ValueError) as e:
         E.latent_tail_comm(0, None, "meta", up_rows=896, latent=3584)
@@ -253,7 +253,7 @@ def test_latent_tail_routes_by_comm(gfx950, comm, monkeypatch):
 
 
 def test_latent_tail_reasons(gfx950, comm):
-    r = E.allreduce_latent_rmsnorm_up_proj_unsupported_reason
+    r = E.allreduce_latent_rmsnorm_up_proj_blocker
     assert "communicator built for up_rows=896, latent=3584, world=8, call is up_rows=1024, latent=3584" in r(
         comm, **tail_args(n=1024))
     assert "257 rows" in r(comm, **tail_args(257))
@@ -264,7 +264,7 @@ def test_latent_tail_reasons(gfx950, comm):
     assert "row strides" in r(comm, **{**tail_args(), "shared": meta(12, 898)[:, :896]})
     assert "norm weight" in r(comm, **{**tail_args(), "norm_weight": meta(7168)})
     assert "shared and out" in r(comm, **tail_args(), out=meta(13, 896))
-    s = E.allreduce_slots_rmsnorm_up_proj_unsupported_reason
+    s = E.allreduce_slots_rmsnorm_up_proj_blocker
     args = (meta(3584), meta(896, 3584), meta(65, 896))
     assert "65 rows (the kernel takes 1..64)" in s(comm, meta(2000, 3584), meta(65 * 16, dtype=i32), *args)
     assert "reverse_sorted" in s(comm, meta(200, 3584), meta(12 * 16, dtype=torch.int64), *args[:2], meta(12, 896))
@@ -296,19 +296,19 @@ def launch_kw(s=12, hidden=7168, k=1536, e=896):
 
 @pytest.fixture
 def runner():
-    return fake_comm(layer_tail._SHAPE_HOSTS[(7168, 1536, 896, 8)], "LayerTailRunner", scratch=meta(1, dtype=u8))
+    return fake_comm(layer_tail._ROUTES.hosts[(7168, 1536, 896, 8)], "LayerTailRunner", scratch=meta(1, dtype=u8))
 
 
 def test_layer_tail_routes_by_runner(gfx950, runner, monkeypatch):
-    r = E.layer_tail_launch_unsupported_reason
+    r = E.layer_tail_launch_blocker
     for s in (4, 16):
         for reset in (False, True):
             assert r(runner, {"tokens": s, "nblocks": 4 + reset, "reset": reset, "m1b_qlen": 0}, **launch_kw(s)) is None
     _, fields = layer_tail._runner_host(type(runner))
     assert {"tokens", "nblocks", "reset", "eps"} <= fields and "m1b_qlen" not in fields
     monkeypatch.setattr(layer_tail.dist, "get_world_size", lambda group: 8)
-    assert E.layer_tail_runner_unsupported_reason("meta", None, 0, hidden=7168, o_proj_k=1536, experts=896) is None
-    reason = E.layer_tail_runner_unsupported_reason("meta", None, 0, hidden=6144, o_proj_k=1536, experts=896)
+    assert E.layer_tail_runner_blocker("meta", None, 0, hidden=7168, o_proj_k=1536, experts=896) is None
+    reason = E.layer_tail_runner_blocker("meta", None, 0, hidden=6144, o_proj_k=1536, experts=896)
     assert "no kernel for hidden=6144, o_proj_k=1536, experts=896, world=8" in reason
     with pytest.raises(ValueError) as e:
         E.layer_tail_runner("meta", None, 0, hidden=6144, o_proj_k=1536, experts=896)
@@ -316,7 +316,7 @@ def test_layer_tail_routes_by_runner(gfx950, runner, monkeypatch):
 
 
 def test_layer_tail_reasons(gfx950, runner):
-    r = E.layer_tail_launch_unsupported_reason
+    r = E.layer_tail_launch_blocker
     build = {"tokens": 12, "nblocks": 4}
     assert "runner built for hidden=7168, o_proj_k=1536, experts=896, world=8, call is " in r(
         runner, build, **launch_kw(e=384))
@@ -356,8 +356,8 @@ def test_swap_stream_workspaces_moves_keys_only(monkeypatch):
     work = {(0, 1, 4, ()): "a4", (0, 2, 4, ()): "b4", (0, 1, 8, ()): "a8", (1, 1, 4, ()): "d1", (0, 3, 4, ()): "c4"}
     aux = {(0, 1, 16): "x", (0, 2, 32): "y"}
     slots = {(0, 1): "s"}
-    hosts = {router._SHAPE_HOSTS[(896, 7168, 16)]: SimpleNamespace(_WORK=work, _AUX_WORK=aux),
-             experts._SHAPE_HOSTS[(896, 768, 1792)]: SimpleNamespace(_WORK=slots)}
+    hosts = {router._ROUTES.hosts[(896, 7168, 16)]: SimpleNamespace(_WORK=work, _AUX_WORK=aux),
+             experts._ROUTES.hosts[(896, 768, 1792)]: SimpleNamespace(_WORK=slots)}
     for name, host in hosts.items():
         monkeypatch.setitem(sys.modules, name, host)
     before = (dict(work), dict(aux), dict(slots))
@@ -367,3 +367,33 @@ def test_swap_stream_workspaces_moves_keys_only(monkeypatch):
     assert aux == {(0, 2, 16): "x", (0, 1, 32): "y"} and slots == {(0, 2): "s"}
     E.swap_stream_workspaces(0, 2, 1)
     assert (work, aux, slots) == before
+
+
+def test_prepare_returns_the_object_or_the_reason(gfx950, monkeypatch):
+    args = (meta(128, 768, 1792, dtype=u8), meta(128 * 768, 112, dtype=u8), meta(128, 3584, 192, dtype=u8),
+            meta(128 * 3584, 16, dtype=u8))
+    assert E.prepare_moe_weights(*args) == E.moe_weights_blocker(*args)
+    w = weights()
+    assert type(E.prepare_moe_weights(w.w13, w.s13, w.w2, w.s2)) is type(w)
+    monkeypatch.setattr(latent_tail.dist, "get_world_size", lambda group: 4)
+    assert "world=4" in E.prepare_latent_tail_comm(0, None, "meta", up_rows=896, latent=3584)
+    monkeypatch.setattr(layer_tail.dist, "get_world_size", lambda group: 8)
+    reason = E.prepare_layer_tail_runner("meta", None, 0, hidden=6144, o_proj_k=1536, experts=896)
+    assert reason == E.layer_tail_runner_blocker("meta", None, 0, hidden=6144, o_proj_k=1536, experts=896)
+
+
+def test_off_rank_operand_keys_print_as_is(gfx950):
+    reason = E.router_sigmoid_bias_topk_weight_blocker(meta(2, 896, 7168))
+    assert "no kernel for (2, 896, 7168, 16)" in reason, reason
+
+
+OLD_NAMES = ["router_sigmoid_bias_topk", "router_sigmoid_bias_topk_weight", "moe_weights", "moe_sort_from_aux",
+             "quantize_moe_activations", "mxfp4_moe_experts", "latent_tail_comm", "allreduce_latent_rmsnorm_up_proj",
+             "allreduce_slots_rmsnorm_up_proj", "layer_tail_runner", "layer_tail_launch"]
+
+
+@pytest.mark.parametrize("op", OLD_NAMES)
+def test_old_names_alias_the_blockers(op):
+    old = op + ("_reason" if op.endswith("_weight") else "_unsupported_reason")
+    alias = getattr(importlib.import_module("amd_kernels.moe.latent_moe_common"), old)
+    assert alias.renamed_to == op + "_blocker" and alias.__wrapped__ is getattr(E, op + "_blocker")

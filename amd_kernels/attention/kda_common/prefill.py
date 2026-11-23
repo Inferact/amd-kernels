@@ -1,46 +1,39 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the amd-kernels project
 """KDA chunked prefill: routes a call by its recurrent state cache's (heads, head_dim) to the shape package
-(``_SHAPE_HOSTS``, imported on the first call of its key)."""
-
-import functools
-import importlib
+(``_ROUTES``, imported on the first call of its key)."""
 
 import torch
 
-from . import device as _dev
+from amd_kernels import routes
+from amd_kernels.routes import Routes, renamed
 
-_SHAPE_HOSTS = {(12, 128): "amd_kernels.attention.kda_prefill_h12_d128"}
-_OP = "kda_prefill"
-
-
-@functools.cache
-def _shape_host(key):
-    name = _SHAPE_HOSTS.get(key)
-    return importlib.import_module(name) if name is not None else None
+_NAMES = ("heads", "head_dim")
+_ROUTES = Routes("kda_prefill", {(12, 128): "amd_kernels.attention.kda_prefill_h12_d128"}, _NAMES)
+_TABLE = Routes("kda_prefill_chunk_table", _ROUTES.hosts, _NAMES)
+_OP = _ROUTES.op
 
 
 def _key(state_cache):
     return (state_cache.shape[1], state_cache.shape[3]) if state_cache.dim() == 4 else None
 
 
-def _no_kernel(op, state_cache):
+def _no_kernel(table, state_cache):
     if state_cache.dim() != 4:
-        return f"{op}: state cache {tuple(state_cache.shape)} (fp32 [slots, heads, head_dim, head_dim])"
-    return (f"{op}: no kernel for heads={state_cache.shape[1]}, head_dim={state_cache.shape[3]} "
-            f"(covered: {sorted(_SHAPE_HOSTS)})")
+        return f"{table.op}: state cache {tuple(state_cache.shape)} (fp32 [slots, heads, head_dim, head_dim])"
+    return table.blocker(_key(state_cache))
 
 
 def kda_prefill_shapes() -> frozenset[tuple[int, int]]:
     """The (heads, head_dim) with a kernel."""
-    return frozenset(_SHAPE_HOSTS)
+    return _ROUTES.shapes()
 
 
 def kda_prefill_chunk_table(cu_seqlens, chunk_indices, state_indices, has_initial_state, *, state_cache):
     """The per-step chunk table ``kda_prefill`` takes as ``table`` (built once per step, shared by the layers)."""
-    pkg = _shape_host(_key(state_cache))
+    pkg = _TABLE.host(_key(state_cache))
     if pkg is None:
-        raise ValueError(_no_kernel("kda_prefill_chunk_table", state_cache))
+        raise ValueError(_no_kernel(_TABLE, state_cache))
     return pkg.chunk_table(cu_seqlens, chunk_indices, state_indices, has_initial_state)
 
 
@@ -49,9 +42,9 @@ def kda_prefill(mixed, raw_g, beta_logit, gate, A_log, dt_bias, conv_weight, con
                 scale=None, table=None, chunk_counts=None, checkpoint_state=None, checkpoint_offsets=None,
                 checkpoint_rows=None, impl=None):
     """The KDA prefill of one layer (the routed package's ``prefill``); ``scale`` None: the package's default."""
-    pkg = _shape_host(_key(state_cache))
+    pkg = _ROUTES.host(_key(state_cache))
     if pkg is None:
-        raise ValueError(_no_kernel(_OP, state_cache))
+        raise ValueError(_no_kernel(_ROUTES, state_cache))
     kw = {} if scale is None else {"scale": scale}
     return pkg.prefill(mixed, raw_g, beta_logit, gate, A_log, dt_bias, conv_weight, conv_state, state_cache,
                        state_indices, has_initial_state, cu_seqlens, chunk_indices, chunk_offsets, norm_weight,
@@ -82,17 +75,16 @@ def _layout(mixed, raw_g, beta_logit, gate, out, conv_state, h, d):
     return None
 
 
-def kda_prefill_unsupported_reason(mixed, raw_g, beta_logit, gate, A_log, dt_bias, conv_weight, conv_state, state_cache,
-                                   state_indices, has_initial_state, cu_seqlens, chunk_indices, chunk_offsets,
-                                   norm_weight, norm_eps, out, lower_bound, scale=None, table=None, chunk_counts=None,
-                                   checkpoint_state=None, checkpoint_offsets=None, checkpoint_rows=None,
-                                   impl=None) -> str | None:
+def kda_prefill_blocker(mixed, raw_g, beta_logit, gate, A_log, dt_bias, conv_weight, conv_state, state_cache,
+                        state_indices, has_initial_state, cu_seqlens, chunk_indices, chunk_offsets, norm_weight,
+                        norm_eps, out, lower_bound, scale=None, table=None, chunk_counts=None, checkpoint_state=None,
+                        checkpoint_offsets=None, checkpoint_rows=None, impl=None) -> str | None:
     """None when ``kda_prefill`` serves this call, else why not (host checks only)."""
-    if not _dev.available():
+    if not routes.available():
         return f"{_OP}: needs gfx950 with FlyDSL"
     key = _key(state_cache)
-    if key not in _SHAPE_HOSTS:
-        return _no_kernel(_OP, state_cache)
+    if key not in _ROUTES.hosts:
+        return _no_kernel(_ROUTES, state_cache)
     h, d = key
     if state_cache.dtype != torch.float32 or state_cache.shape[2] != d or state_cache.stride(1) != d * d:
         return f"{_OP}: state cache {tuple(state_cache.shape)} {state_cache.dtype} (fp32 [slots, {h}, {d}, {d}])"
@@ -132,3 +124,6 @@ def kda_prefill_unsupported_reason(mixed, raw_g, beta_logit, gate, A_log, dt_bia
     if impl not in (None, "mega", "staged"):
         return f"{_OP}: impl {impl!r} (None, 'mega' or 'staged')"
     return None
+
+
+kda_prefill_unsupported_reason = renamed(kda_prefill_blocker, "kda_prefill_unsupported_reason")

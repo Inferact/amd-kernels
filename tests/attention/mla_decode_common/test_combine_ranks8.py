@@ -29,7 +29,7 @@ def _worker(rank, errors):
     warm_up.set_auto(True)
     warm_up.set_workers(4)
     group = dist.group.WORLD
-    why = E.lse_combine_comm_unsupported_reason(rank, group, dev, **DIMS)
+    why = E.lse_combine_comm_blocker(rank, group, dev, **DIMS)
     if why is not None:
         errors.append(f"rank {rank}: factory reason {why}")
     comm = E.lse_combine_comm(rank, group, dev, **DIMS)
@@ -45,7 +45,7 @@ def _worker(rank, errors):
             for s, q in ((None, None), (sls[rank], qsls[rank])):
                 outs = [torch.zeros((t, 12, 128), dtype=torch.bfloat16, device=dev) for _ in range(2)]
                 args = (comm, xs[rank], lses[rank], wt, outs[1], s, q, g)
-                why = E.lse_combine_vup_unsupported_reason(*args)
+                why = E.lse_combine_vup_blocker(*args)
                 if why is not None:
                     errors.append(f"rank {rank} t{t}: reason {why}")
                 dcp8_lse_combine_vup(comm, xs[rank], lses[rank], wt, outs[0], s, q, g)
@@ -54,7 +54,7 @@ def _worker(rank, errors):
                 if got is not outs[1] or not same_bytes(outs[0], outs[1]):
                     errors.append(f"rank {rank} t{t} gate={g is not None} seq={s is not None}: entry != package")
     q_a = torch.zeros((4, 1536), dtype=torch.bfloat16, device=dev)
-    why = E.q_bproj_wuk_gather_unsupported_reason(comm, q_a, q_a, q_a)
+    why = E.q_bproj_wuk_gather_blocker(comm, q_a, q_a, q_a)
     if not (why or "").startswith("q_bproj_wuk_gather: no kernel for communicator DcpVupCombine"):
         errors.append(f"rank {rank}: cross-entry communicator reason {why}")
 

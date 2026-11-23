@@ -5,33 +5,30 @@ experts, latent tail, final all-reduce), routed by (hidden, o_proj K, experts, w
 key; its launches route by the runner."""
 import dataclasses
 import functools
-import importlib
 from collections.abc import Mapping
 
 import torch
 import torch.distributed as dist
 
+from amd_kernels import routes
+from amd_kernels.routes import Routes, prepare, renamed
+
 from . import dispatch
 
 # hidden, o_proj K (w_o [hidden, K]), routed experts (w13 [E, ...]), world
-_SHAPE_HOSTS = {(7168, 1536, 896, 8): "amd_kernels.moe.layer_tail_k2_h7168_ranks8.host"}
 _NAMES = ("hidden", "o_proj_k", "experts", "world")
-_OP = "layer_tail_launch"
+_ROUTES = Routes("layer_tail_launch", {(7168, 1536, 896, 8): "amd_kernels.moe.layer_tail_k2_h7168_ranks8.host"}, _NAMES)
+_RUNNER = Routes("layer_tail_runner", _ROUTES.hosts, _NAMES)
+_OP = _ROUTES.op
 MAX_BLOCKS = 8  # the AttnRes block sources LayerTailRunner sizes its scratch for
 
 
 @functools.cache
-def _shape_host(key):
-    name = _SHAPE_HOSTS.get(key)
-    return importlib.import_module(name) if name is not None else None
-
-
-@functools.cache
 def _runner_host(cls):
-    key = dispatch.key_of_type(_SHAPE_HOSTS, cls)
+    key = _ROUTES.owner(cls)
     if key is None:
-        raise ValueError(dispatch.no_kernel_for_type(_OP, cls, _SHAPE_HOSTS))
-    host = _shape_host(key)
+        raise ValueError(dispatch.not_owned(_ROUTES, cls))
+    host = _ROUTES.package(key)
     return host, frozenset(f.name for f in dataclasses.fields(host.K2Build))
 
 
@@ -56,22 +53,22 @@ def _k2_build(cls, items):
 def layer_tail_runner(device, group, rank, *, hidden, o_proj_k, experts, min_scratch=0):
     """The per-rank state of the launches (collective over ``group``): ``.step_begin()`` once a forward before its
     first launch, ``.close()``."""
-    key = (hidden, o_proj_k, experts, dist.get_world_size(group))
-    host = _shape_host(key)
-    if host is None:
-        raise ValueError(dispatch.no_kernel("layer_tail_runner", _NAMES, key, _SHAPE_HOSTS))
+    host = _RUNNER.package((hidden, o_proj_k, experts, dist.get_world_size(group)))
     return host.LayerTailRunner(device, group, rank, min_scratch=min_scratch)
 
 
-def layer_tail_runner_unsupported_reason(device, group, rank, *, hidden, o_proj_k, experts,
-                                         min_scratch=0) -> str | None:
-    op = "layer_tail_runner"
-    if not dispatch.available():
-        return f"{op}: needs gfx950 with FlyDSL"
-    key = (hidden, o_proj_k, experts, dist.get_world_size(group))
-    if key not in _SHAPE_HOSTS:
-        return dispatch.no_kernel(op, _NAMES, key, _SHAPE_HOSTS)
-    return None
+def layer_tail_runner_blocker(device, group, rank, *, hidden, o_proj_k, experts, min_scratch=0) -> str | None:
+    if not routes.available():
+        return f"{_RUNNER.op}: needs gfx950 with FlyDSL"
+    return _RUNNER.blocker((hidden, o_proj_k, experts, dist.get_world_size(group)))
+
+
+def prepare_layer_tail_runner(device, group, rank, *, hidden, o_proj_k, experts, min_scratch=0):
+    """The runner of this rank, or the reason none serves this key."""
+    return prepare(layer_tail_runner_blocker(device, group, rank, hidden=hidden, o_proj_k=o_proj_k, experts=experts,
+                                             min_scratch=min_scratch),
+                   lambda: layer_tail_runner(device, group, rank, hidden=hidden, o_proj_k=o_proj_k, experts=experts,
+                                             min_scratch=min_scratch))
 
 
 def layer_tail_launch(runner, build: Mapping, *, core, w_o, prefix, blocks, ares_nw, ares_qk, in_nw, w_gate, bias,
@@ -89,21 +86,21 @@ def layer_tail_launch(runner, build: Mapping, *, core, w_o, prefix, blocks, ares
 
 
 def layer_tail_launch_shapes() -> frozenset:
-    return frozenset(_SHAPE_HOSTS)
+    return _ROUTES.shapes()
 
 
-def layer_tail_launch_unsupported_reason(runner, build: Mapping, *, core, w_o, prefix, blocks, ares_nw, ares_qk, in_nw,
-                                         w_gate, bias, w_ld, w_sgu, w_sd, w13, w13s, w2, w2s, ln_w, w_up, out, layer,
-                                         tl=None) -> str | None:
-    if not dispatch.available():
+def layer_tail_launch_blocker(runner, build: Mapping, *, core, w_o, prefix, blocks, ares_nw, ares_qk, in_nw, w_gate,
+                              bias, w_ld, w_sgu, w_sd, w13, w13s, w2, w2s, ln_w, w_up, out, layer,
+                              tl=None) -> str | None:
+    if not routes.available():
         return f"{_OP}: needs gfx950 with FlyDSL"
-    key = dispatch.key_of_type(_SHAPE_HOSTS, type(runner))
+    key = _ROUTES.owner(type(runner))
     if key is None:
-        return dispatch.no_kernel_for_type(_OP, type(runner), _SHAPE_HOSTS)
-    host = _shape_host(key)
+        return dispatch.not_owned(_ROUTES, type(runner))
+    host = _ROUTES.package(key)
     call = (prefix.shape[-1], w_o.shape[-1], w13.shape[0])
     if call != key[:3]:
-        return dispatch.built_for(_OP, _NAMES, key, call, "runner")
+        return dispatch.built_for(_ROUTES, key, call, "runner")
     if "tokens" not in build or "nblocks" not in build:
         return f"{_OP}: build needs tokens and nblocks"
     try:
@@ -132,3 +129,7 @@ def layer_tail_launch_unsupported_reason(runner, build: Mapping, *, core, w_o, p
                                              bias=bias, w_ld=w_ld, w_sgu=w_sgu, w_sd=w_sd, w13=w13, w13s=w13s, w2=w2,
                                              w2s=w2s, ln_w=ln_w, w_up=w_up)
     return None if reason is None else f"{_OP}: {reason}"
+
+
+layer_tail_runner_unsupported_reason = renamed(layer_tail_runner_blocker, "layer_tail_runner_unsupported_reason")
+layer_tail_launch_unsupported_reason = renamed(layer_tail_launch_blocker, "layer_tail_launch_unsupported_reason")

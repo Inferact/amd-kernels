@@ -15,13 +15,14 @@ output. The reason is host-only (shapes, dtypes, strides, ints) and takes exactl
 ## Entry points
 
 - `available`: gfx950 with FlyDSL importable.
-- `dense_mlp_workspace`, `dense_mlp_workspace_unsupported_reason`: the per-stream workspace of a (hidden, inter).
+- `dense_mlp_workspace`, `dense_mlp_workspace_blocker`, `prepare_dense_mlp_workspace`: the per-stream workspace of
+  a (hidden, inter), whether it can be built, the workspace or the reason.
 - `dense_mlp_pack_gate_up`, `dense_mlp_pack_down`: the load-time weight layouts.
 - `dense_mlp_packed_tiles`, `dense_mlp_rows_buffer`: the packed activations of a row count.
-- `bf16_dense_mlp`, `bf16_dense_mlp_unsupported_reason`, `bf16_dense_mlp_shapes`: the op, whether a call is served,
+- `bf16_dense_mlp`, `bf16_dense_mlp_blocker`, `bf16_dense_mlp_shapes`: the op, whether a call is served,
   the covered (hidden, inter).
 
-Dispatch: `host._SHAPE_HOSTS` ((hidden, inter) -> host module of the shape package).
+Dispatch: `host._ROUTES` ((hidden, inter) -> host module of the shape package).
 
 ## Performance
 

@@ -3,54 +3,41 @@
 """Dense fp8 MLA decode over a context-parallel round-robin shard: key (heads, d_qk) from ``q``. ``cp_world`` is a
 run-time argument the kernels compile for (any value), not a key dim."""
 
-import functools
-import importlib
-
 import torch
 
-from .routing import available, no_kernel
+from amd_kernels import routes
+from amd_kernels.routes import Routes, renamed
 
-_SHAPE_HOSTS = {
-    (96, 576): "amd_kernels.attention.fp8_dense_mla_decode_h96_kv512.host",
-}
-_KEY = ("heads", "d_qk")
-_OP = "fp8_dense_mla_decode"
-
-
-@functools.cache
-def _shape_host(key):
-    name = _SHAPE_HOSTS.get(key)
-    return importlib.import_module(name) if name is not None else None
+_ROUTES = Routes("fp8_dense_mla_decode", {(96, 576): "amd_kernels.attention.fp8_dense_mla_decode_h96_kv512.host"},
+                 ("heads", "d_qk"))
+_OP = _ROUTES.op
 
 
 def fp8_dense_mla_decode(q, kv_cache, kv_indptr, kv_indices, g_kv_indptr, q_scale, kv_scale, sm_scale, query_len,
                          cp_rank=0, cp_world=8, out=None, lse=None):
     """``(out, lse)``: the partial latent attention output [rows, heads, kv_lora] bf16 and the natural-log LSE
     [rows, heads] fp32 of ``q`` [requests * query_len, heads, d_qk] e4m3 over this rank's shard of the context."""
-    key = (q.shape[1], q.shape[2])
-    pkg = _shape_host(key)
-    if pkg is None:
-        raise ValueError(no_kernel(_OP, _KEY, key, _SHAPE_HOSTS))
+    pkg = _ROUTES.package((q.shape[1], q.shape[2]))
     return pkg.fp8_dense_mla_decode(q, kv_cache, kv_indptr, kv_indices, g_kv_indptr, q_scale, kv_scale, sm_scale,
                                     query_len, cp_rank, cp_world, out, lse)
 
 
 def fp8_dense_mla_decode_shapes() -> frozenset:
-    return frozenset(_SHAPE_HOSTS)
+    return _ROUTES.shapes()
 
 
-def fp8_dense_mla_decode_unsupported_reason(q, kv_cache, kv_indptr, kv_indices, g_kv_indptr, q_scale, kv_scale,
-                                            sm_scale, query_len, cp_rank=0, cp_world=8, out=None,
-                                            lse=None) -> str | None:
+def fp8_dense_mla_decode_blocker(q, kv_cache, kv_indptr, kv_indices, g_kv_indptr, q_scale, kv_scale, sm_scale,
+                                 query_len, cp_rank=0, cp_world=8, out=None, lse=None) -> str | None:
     op = _OP
     if q.dim() != 3:
         return f"{op}: operand layout (q [rows, heads, d_qk])"
     key = (q.shape[1], q.shape[2])
-    if key not in _SHAPE_HOSTS:
-        return no_kernel(op, _KEY, key, _SHAPE_HOSTS)
-    if not available():
+    reason = _ROUTES.blocker(key)
+    if reason is not None:
+        return reason
+    if not routes.available():
         return f"{op}: needs gfx950 with FlyDSL"
-    host = _shape_host(key)
+    host = _ROUTES.package(key)
     if not 1 <= query_len <= host.MAX_QLEN:
         return f"{op}: query_len {query_len} (the kernel takes 1..{host.MAX_QLEN})"
     rows = q.shape[0]
@@ -66,3 +53,7 @@ def fp8_dense_mla_decode_unsupported_reason(q, kv_cache, kv_indptr, kv_indices, 
     if lse is not None and (lse.dtype != torch.float32 or lse.shape != (rows, key[0]) or lse.stride(1) != 1):
         return f"{op}: operand layout (lse fp32 [rows, {key[0]}], unit column stride)"
     return None
+
+
+fp8_dense_mla_decode_unsupported_reason = renamed(fp8_dense_mla_decode_blocker,
+                                                  "fp8_dense_mla_decode_unsupported_reason")

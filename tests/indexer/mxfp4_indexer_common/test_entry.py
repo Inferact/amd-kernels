@@ -10,11 +10,11 @@ import torch
 
 from amd_kernels.indexer.mxfp4_indexer_common import (
     mxfp4_paged_score_topk,
-    mxfp4_paged_score_topk_unsupported_reason,
+    mxfp4_paged_score_topk_blocker,
     mxfp4_prefill_score,
-    mxfp4_prefill_score_unsupported_reason,
+    mxfp4_prefill_score_blocker,
     mxfp4_prefill_topk,
-    mxfp4_prefill_topk_unsupported_reason,
+    mxfp4_prefill_topk_blocker,
     paged,
     paged_score_topk_preallocate,
     paged_score_topk_prefer,
@@ -27,9 +27,9 @@ from tests.indexer.mxfp4_paged_score_topk_d128_h32_top2048.inputs import require
 from tests.indexer.mxfp4_prefill_score_d128_h32.inputs import make_inputs as score_inputs
 from tests.indexer.mxfp4_prefill_topk_d128_h32_top2048.inputs import make_logits, make_windows
 
-PAGED = importlib.import_module(paged._SHAPE_HOSTS[(32, 128, 2048, 64)])
-SCORE = importlib.import_module(prefill._SCORE_HOSTS[(32, 128)])
-TOPK = importlib.import_module(prefill._TOPK_HOSTS[(2048,)])
+PAGED = importlib.import_module(paged._ROUTES.hosts[(32, 128, 2048, 64)])
+SCORE = importlib.import_module(prefill._SCORE_ROUTES.hosts[(32, 128)])
+TOPK = importlib.import_module(prefill._TOPK_ROUTES.hosts[(2048,)])
 
 
 def outputs(rows, topk=2048):
@@ -43,7 +43,7 @@ def test_paged_equals_package(seqs, qlen, width):
     inputs = paged_inputs(seqs, qlen, width, seed=seqs * 7 + width)
     rows = seqs * qlen
     got, want = outputs(rows), outputs(rows)
-    assert mxfp4_paged_score_topk_unsupported_reason(**inputs, out_indices=got[0], out_scores=got[1]) is None
+    assert mxfp4_paged_score_topk_blocker(**inputs, out_indices=got[0], out_scores=got[1]) is None
     mxfp4_paged_score_topk(**inputs, out_indices=got[0], out_scores=got[1])
     PAGED.mxfp4_paged_score_topk(**inputs, out_indices=want[0], out_scores=want[1])
     torch.cuda.synchronize()
@@ -103,11 +103,11 @@ def test_paged_scratch_rows(batch):
         dev = torch.cuda.current_device()
         assert [k[1] for k in PAGED.host._SETS if k[0] == dev] == [stream.cuda_stream]
         assert PAGED.host._SETS[(dev, stream.cuda_stream)][0].numel() == 40 * PAGED.geometry.POOL
-        assert "the scratch holds 40" in mxfp4_paged_score_topk_unsupported_reason(
+        assert "the scratch holds 40" in mxfp4_paged_score_topk_blocker(
             **big, out_indices=over[0], out_scores=over[1])
         stream.wait_stream(torch.cuda.current_stream())
         with torch.cuda.stream(stream):
-            assert mxfp4_paged_score_topk_unsupported_reason(**inputs, out_indices=got[0], out_scores=got[1]) is None
+            assert mxfp4_paged_score_topk_blocker(**inputs, out_indices=got[0], out_scores=got[1]) is None
             paged_score_topk_reset_counts(inputs["query_start_loc"], inputs["max_query_len"], cache=inputs["cache"],
                                           out_indices=got[0])
             mxfp4_paged_score_topk(**inputs, out_indices=got[0], out_scores=got[1])
@@ -126,7 +126,7 @@ def test_prefill_score_equals_package(rows, keys):
     width = args[3].shape[0] * 64
     got = torch.full((rows, width), 7.0, device="cuda")
     want = got.clone()
-    assert mxfp4_prefill_score_unsupported_reason(*args, got, 0.5) is None
+    assert mxfp4_prefill_score_blocker(*args, got, 0.5) is None
     mxfp4_prefill_score(*args, got, 0.5)
     SCORE.score_rows(*args, want, 0.5)
     torch.cuda.synchronize()
@@ -146,7 +146,7 @@ def test_prefill_topk_equals_package(kind, rows, width, windows, order):
     perm = torch.argsort(ke - ks, descending=True).int() if order else None
     got = torch.full((rows, 2048), -7, dtype=torch.int32, device="cuda")
     want = got.clone()
-    assert mxfp4_prefill_topk_unsupported_reason(logits, ks, ke, got, perm) is None
+    assert mxfp4_prefill_topk_blocker(logits, ks, ke, got, perm) is None
     mxfp4_prefill_topk(logits, ks, ke, got, perm)
     TOPK.topk_rows(logits, ks, ke, want, perm)
     torch.cuda.synchronize()

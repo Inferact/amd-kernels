@@ -28,8 +28,8 @@ def body(rank, errors):
     warm_up.set_auto(True)
     dev = torch.device("cuda", rank)
     group = dist.group.WORLD
-    host = importlib.import_module(entry._SHAPE_HOSTS[KEY])
-    if N.attnres_comm_unsupported_reason(rank, group, dev, hidden=7168) is not None:
+    host = importlib.import_module(entry._ROUTES.hosts[KEY])
+    if N.attnres_comm_blocker(rank, group, dev, hidden=7168) is not None:
         errors.append(f"rank {rank}: factory reason")
     comm = N.attnres_comm(rank, group, dev, hidden=7168)
     if type(comm) is not host.AttnResComm:
@@ -44,7 +44,7 @@ def body(rank, errors):
                 for call in (comm.allreduce_attnres_rmsnorm, package):
                     prefix, bank = prefix0.clone(), bank0.clone()
                     a = (parts[rank], prefix if hp else None, bank, nw, qk, nb, widx, ow if on else None)
-                    if N.allreduce_attnres_rmsnorm_unsupported_reason(comm, *a, reduce=reduce) is not None:
+                    if N.allreduce_attnres_rmsnorm_blocker(comm, *a, reduce=reduce) is not None:
                         errors.append(f"rank {rank}: reason on served rows {m}")
                     out, pout = call(*a, reduce=reduce)
                     outs.append((out, pout, bank))
@@ -53,7 +53,7 @@ def body(rank, errors):
                     errors.append(f"rank {rank}: rows {m} case {ci} reduce {reduce} differ from the package call")
 
     parts, prefix0, bank0, nw, qk, ow = make(12, 5, dev)
-    reason = N.allreduce_attnres_rmsnorm_unsupported_reason(comm, parts[rank][:, :6144], None, None, None, None, 0)
+    reason = N.allreduce_attnres_rmsnorm_blocker(comm, parts[rank][:, :6144], None, None, None, None, 0)
     if reason != "allreduce_attnres_rmsnorm: communicator built for hidden=7168, world=8, call is hidden=6144":
         errors.append(f"rank {rank}: mismatch reason {reason!r}")
 

@@ -20,10 +20,10 @@ def _inputs(rows, k, layers, dev, seed):
 def worker(rank, errors):
     from amd_kernels import compile_watch, warm_up
     from amd_kernels.decoder.bf16_dense_mlp_common import bf16_dense_mlp_shapes, dense_mlp_workspace
-    from amd_kernels.gemm.bf16_common import (bf16_linear_gather, bf16_linear_gather_shapes,
-                                              bf16_linear_gather_unsupported_reason, linear_gather,
-                                              linear_gather_comm, linear_gather_comm_unsupported_reason,
-                                              linear_gather_pack_aux, linear_gather_pack_aux_unsupported_reason,
+    from amd_kernels.gemm.bf16_common import (bf16_linear_gather, bf16_linear_gather_blocker,
+                                              bf16_linear_gather_shapes, linear_gather,
+                                              linear_gather_comm, linear_gather_comm_blocker,
+                                              linear_gather_pack_aux, linear_gather_pack_aux_blocker,
                                               linear_gather_pack_weight, linear_gather_rows_buffer)
 
     warm_up.set_auto(True)
@@ -34,9 +34,9 @@ def worker(rank, errors):
         errors.append(f"rank {rank}: no covered shape for {dist.get_world_size(group)} ranks")
     for key in keys:
         n_shard, k, world = key
-        host = importlib.import_module(linear_gather._SHAPE_HOSTS[key])
+        host = importlib.import_module(linear_gather._ROUTES.hosts[key])
         layers, hi = linear_gather._layers(host), linear_gather._max_rows(host)
-        reason = linear_gather_comm_unsupported_reason(rank, group, dev, n_shard=n_shard, k=k)
+        reason = linear_gather_comm_blocker(rank, group, dev, n_shard=n_shard, k=k)
         if reason is not None:
             errors.append(f"rank {rank}: {reason}")
             return
@@ -55,8 +55,8 @@ def worker(rank, errors):
             aux = _inputs(rows, k, layers, dev, rows)
             xp = linear_gather_rows_buffer(rows, dev, w_packed=wp)
             xd = host.packed_rows_buffer(rows, dev)
-            for r in (linear_gather_pack_aux_unsupported_reason(aux, xp, rows, w_packed=wp),
-                      bf16_linear_gather_unsupported_reason(comm, xp, wp, nw, rows)):
+            for r in (linear_gather_pack_aux_blocker(aux, xp, rows, w_packed=wp),
+                      bf16_linear_gather_blocker(comm, xp, wp, nw, rows)):
                 if r is not None:
                     errors.append(f"rank {rank}: {r}")
             linear_gather_pack_aux(aux, xp, rows, w_packed=wp)
@@ -99,15 +99,15 @@ def worker(rank, errors):
         xp = eager[1][0]
         hidden, inter = min(bf16_dense_mlp_shapes())
         other = dense_mlp_workspace(dev, hidden=hidden, inter=inter)
-        r = bf16_linear_gather_unsupported_reason(other, xp, wp, nw, 1)
+        r = bf16_linear_gather_blocker(other, xp, wp, nw, 1)
         if r is None or "no kernel for communicator" not in r:
             errors.append(f"rank {rank}: another entry's object: {r}")
-        r = bf16_linear_gather_unsupported_reason(comm, xp, wp[: n_shard // 2], nw, 1)
+        r = bf16_linear_gather_blocker(comm, xp, wp[: n_shard // 2], nw, 1)
         if r is None or "communicator built for" not in r:
             errors.append(f"rank {rank}: weight of another shape: {r}")
         comm.close()
         direct.close()
-        r = bf16_linear_gather_unsupported_reason(comm, xp, wp, nw, 1)
+        r = bf16_linear_gather_blocker(comm, xp, wp, nw, 1)
         if r is None or "closed" not in r:
             errors.append(f"rank {rank}: closed communicator: {r}")
 

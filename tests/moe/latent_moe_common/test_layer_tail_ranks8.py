@@ -28,9 +28,9 @@ def body(rank, errors):
 
     dev = torch.device("cuda", rank)
     group = dist.group.WORLD
-    host = importlib.import_module(layer_tail._SHAPE_HOSTS[KEY])
+    host = importlib.import_module(layer_tail._ROUTES.hosts[KEY])
     dims = dict(hidden=7168, o_proj_k=1536, experts=896)
-    if E.layer_tail_runner_unsupported_reason(dev, group, rank, **dims) is not None:
+    if E.layer_tail_runner_blocker(dev, group, rank, **dims) is not None:
         errors.append(f"rank {rank}: factory reason")
     runner = E.layer_tail_runner(dev, group, rank, **dims)
     _, wd = moe_weights(rank, dev)
@@ -47,7 +47,7 @@ def body(rank, errors):
             build = {"tokens": s, "nblocks": 4 + reset, "reset": reset, "m1b_qlen": 0, "dsa": False}
             pa, pb = prefix.clone(), prefix.clone()
             oa, ob = (torch.empty(s, 7168, dtype=torch.bfloat16, device=dev) for _ in range(2))
-            if E.layer_tail_launch_unsupported_reason(runner, build, prefix=pb, out=ob, **kw) is not None:
+            if E.layer_tail_launch_blocker(runner, build, prefix=pb, out=ob, **kw) is not None:
                 errors.append(f"rank {rank}: reason on served rows {s}")
             runner.step_begin()
             host.k2_launch(host.K2Build(tokens=s, nblocks=4 + reset, reset=reset), prefix=pa, out=oa, **kw,
@@ -61,7 +61,7 @@ def body(rank, errors):
     prefix, kw = args(4)
     out = torch.empty(4, 7168, dtype=torch.bfloat16, device=dev)
     other = torch.empty(384, 768, 1792, dtype=torch.uint8, device="meta")
-    reason = E.layer_tail_launch_unsupported_reason(runner, {"tokens": 4, "nblocks": 4}, prefix=prefix, out=out,
+    reason = E.layer_tail_launch_blocker(runner, {"tokens": 4, "nblocks": 4}, prefix=prefix, out=out,
                                                     **{**kw, "w13": other})
     if "runner built for hidden=7168, o_proj_k=1536, experts=896, world=8, call is" not in (reason or ""):
         errors.append(f"rank {rank}: mismatch reason {reason!r}")

@@ -85,13 +85,13 @@ HEADER = ("| rows | graph direct | graph entry | host direct | host entry | disp
 
 
 def latent_down(rows_list, rounds):
-    from amd_kernels.gemm.bf16_common import (bf16_latent_down_mxfp4_quant, bf16_latent_down_mxfp4_quant_shapes,
-                                              bf16_latent_down_mxfp4_quant_unsupported_reason)
+    from amd_kernels.gemm.bf16_common import (bf16_latent_down_mxfp4_quant, bf16_latent_down_mxfp4_quant_blocker,
+                                              bf16_latent_down_mxfp4_quant_shapes)
     from amd_kernels.gemm.bf16_common import latent_down as entry
 
     for key in sorted(bf16_latent_down_mxfp4_quant_shapes()):
         n, k = key
-        name = entry._SHAPE_HOSTS[key]
+        name = entry._ROUTES.hosts[key]
         direct = getattr(importlib.import_module(name), name.split(".")[-2])
         w = (torch.randn(n, k, device="cuda") * 0.02).bfloat16()
         print(f"latent down {key}\n{HEADER}")
@@ -100,15 +100,15 @@ def latent_down(rows_list, rounds):
             out = (torch.empty(rows, n // 2, dtype=torch.uint8, device="cuda"),
                    torch.empty(rows, n // 32, dtype=torch.uint8, device="cuda"))
             _print(rows, timeit([lambda: bf16_latent_down_mxfp4_quant(x, w, out), lambda: direct(x, w, out)], rounds),
-                   host_us(lambda: entry._op(entry._shape_host(tuple(w.shape))), rounds),
-                   host_us(lambda: bf16_latent_down_mxfp4_quant_unsupported_reason(x, w, out), rounds))
+                   host_us(lambda: entry._op(entry._ROUTES.host(tuple(w.shape))), rounds),
+                   host_us(lambda: bf16_latent_down_mxfp4_quant_blocker(x, w, out), rounds))
 
 
 def _linear_gather_rank(rank, port, rows_list, rounds):
     torch.cuda.set_device(rank)
     dist.init_process_group("gloo", init_method=f"tcp://127.0.0.1:{port}", rank=rank, world_size=8)
-    from amd_kernels.gemm.bf16_common import (bf16_linear_gather, bf16_linear_gather_shapes,
-                                              bf16_linear_gather_unsupported_reason, linear_gather,
+    from amd_kernels.gemm.bf16_common import (bf16_linear_gather, bf16_linear_gather_blocker,
+                                              bf16_linear_gather_shapes, linear_gather,
                                               linear_gather_comm, linear_gather_pack_weight,
                                               linear_gather_rows_buffer)
 
@@ -117,7 +117,7 @@ def _linear_gather_rank(rank, port, rows_list, rounds):
         n_shard, k, world = key
         if world != 8:
             continue
-        host = importlib.import_module(linear_gather._SHAPE_HOSTS[key])
+        host = importlib.import_module(linear_gather._ROUTES.hosts[key])
         comm = linear_gather_comm(rank, dist.group.WORLD, dev, n_shard=n_shard, k=k)
         wp = linear_gather_pack_weight((torch.randn(n_shard, k, device=dev) * 0.01).bfloat16())
         nw = torch.ones(n_shard * world, dtype=torch.bfloat16, device=dev)
@@ -128,8 +128,8 @@ def _linear_gather_rank(rank, port, rows_list, rounds):
             out = torch.empty(rows, n_shard * world, dtype=torch.bfloat16, device=dev)
             res = timeit([lambda: bf16_linear_gather(comm, xp, wp, nw, rows, 1e-5, out),
                           lambda: host.context_proj_gather_norm(comm, xp, wp, nw, rows, 1e-5, out)], rounds)
-            dispatch = host_us(lambda: linear_gather._shape_host(linear_gather._comm_key(type(comm))), rounds)
-            reason = host_us(lambda: bf16_linear_gather_unsupported_reason(comm, xp, wp, nw, rows, 1e-5, out), rounds)
+            dispatch = host_us(lambda: linear_gather._ROUTES.host(linear_gather._comm_key(type(comm))), rounds)
+            reason = host_us(lambda: bf16_linear_gather_blocker(comm, xp, wp, nw, rows, 1e-5, out), rounds)
             if rank == 0:
                 _print(rows, res, dispatch, reason)
         comm.close()
