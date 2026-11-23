@@ -12,6 +12,7 @@ import sys
 import pytest
 import torch
 
+from amd_kernels import routes
 from amd_kernels.attention import norm_rope_insert_common as E
 from amd_kernels.attention.norm_rope_insert_common import device, multilayer, qkv
 
@@ -43,9 +44,9 @@ def ml_args(d=64, rot=64, n=40, nl=5, nkv=2, cache=U8):
 
 
 OPS = [
-    ("qkv", qkv, E.qkv_norm_rope_insert, E.qkv_norm_rope_insert_unsupported_reason, qkv_args,
+    ("qkv", qkv, E.qkv_norm_rope_insert, E.qkv_norm_rope_insert_blocker, qkv_args,
      ("rope_blocker",)),
-    ("multilayer", multilayer, E.kv_norm_rope_insert_multilayer, E.kv_norm_rope_insert_multilayer_unsupported_reason,
+    ("multilayer", multilayer, E.kv_norm_rope_insert_multilayer, E.kv_norm_rope_insert_multilayer_blocker,
      ml_args, ("rope_blocker",)),
 ]  # fmt: skip
 IDS = [o[0] for o in OPS]
@@ -53,15 +54,15 @@ IDS = [o[0] for o in OPS]
 
 @pytest.fixture
 def gfx950(monkeypatch):
-    monkeypatch.setattr(device, "available", lambda: True)
+    monkeypatch.setattr(routes, "available", lambda: True)
 
 
 @pytest.mark.parametrize("name,mod,op,reason,args,exports", OPS, ids=IDS)
 def test_table_imports_and_exports(name, mod, op, reason, args, exports):
-    for key, path in mod._SHAPE_HOSTS.items():
+    for key, path in mod._ROUTES.hosts.items():
         pkg = importlib.import_module(path)
         assert all(hasattr(pkg, e) for e in exports), (path, exports)
-        assert mod._shape_host(key) is pkg
+        assert mod._ROUTES.host(key) is pkg
         assert hasattr(mod._op_module(key), op.__name__)
 
 
@@ -74,8 +75,8 @@ def test_reason_and_kernel_take_the_op_arguments(name, mod, op, reason, args, ex
 
 
 def test_shapes_are_the_table_keys():
-    assert E.qkv_norm_rope_insert_shapes() == frozenset(qkv._SHAPE_HOSTS) == {(64, 64)}
-    assert E.kv_norm_rope_insert_multilayer_shapes() == frozenset(multilayer._SHAPE_HOSTS) == {(64, 64)}
+    assert E.qkv_norm_rope_insert_shapes() == frozenset(qkv._ROUTES.hosts) == {(64, 64)}
+    assert E.kv_norm_rope_insert_multilayer_shapes() == frozenset(multilayer._ROUTES.hosts) == {(64, 64)}
 
 
 @pytest.mark.parametrize("cache", [U8, torch.float8_e4m3fn, BF])
@@ -84,7 +85,7 @@ def test_covered_shape_routes_and_has_no_reason(gfx950, name, mod, op, reason, a
     a = args(cache=cache)
     assert reason(**a) is None
     key = mod._key(a["q_norm_weight"] if name == "qkv" else a["k_norm_weight"], a["cos_sin_cache"])
-    assert mod._shape_host(key).__name__ == mod._SHAPE_HOSTS[key]
+    assert mod._ROUTES.host(key).__name__ == mod._ROUTES.hosts[key]
     assert getattr(E, op.__name__ + "_kernel")(**a) is getattr(mod._op_module(key), op.__name__)
 
 
@@ -93,7 +94,7 @@ def test_covered_shape_routes_and_has_no_reason(gfx950, name, mod, op, reason, a
 def test_uncovered_shape_reason_and_raise(gfx950, name, mod, op, reason, args, exports, d, rot):
     a = args(d=d, rot=rot)
     why = reason(**a)
-    assert "no kernel" in why and str(sorted(mod._SHAPE_HOSTS)) in why, why
+    assert "no kernel" in why and str(sorted(mod._ROUTES.hosts)) in why, why
     for fn in (op, getattr(E, op.__name__ + "_kernel")):
         with pytest.raises(ValueError) as e:
             fn(**a)
@@ -109,10 +110,10 @@ def test_no_device_reason():
 
 def test_rope_reason():
     cs = t(4096, 64)
-    assert E.rope_unsupported_reason(64, 64, True, cs) is None
-    assert "not NeoX" in E.rope_unsupported_reason(64, 64, False, cs)
-    assert "no kernel" in E.rope_unsupported_reason(128, 64, True, cs)
-    assert "cos / sin cache" in E.rope_unsupported_reason(64, 64, True, t(4096, 64, dtype=F32))
+    assert E.norm_rope_insert_rope_blocker(64, 64, True, cs) is None
+    assert "not NeoX" in E.norm_rope_insert_rope_blocker(64, 64, False, cs)
+    assert "no kernel" in E.norm_rope_insert_rope_blocker(128, 64, True, cs)
+    assert "cos / sin cache" in E.norm_rope_insert_rope_blocker(64, 64, True, t(4096, 64, dtype=F32))
 
 
 def _set(k, v):
@@ -154,7 +155,7 @@ ML_BRANCHES = [
 def test_qkv_reasons(gfx950, label, edit, want):
     a = qkv_args()
     edit(a)
-    why = E.qkv_norm_rope_insert_unsupported_reason(**a)
+    why = E.qkv_norm_rope_insert_blocker(**a)
     assert why is not None and why.startswith("qkv_norm_rope_insert: ") and want in why, why
 
 
@@ -162,7 +163,7 @@ def test_qkv_reasons(gfx950, label, edit, want):
 def test_multilayer_reasons(gfx950, label, edit, want):
     a = ml_args()
     edit(a)
-    why = E.kv_norm_rope_insert_multilayer_unsupported_reason(**a)
+    why = E.kv_norm_rope_insert_multilayer_blocker(**a)
     assert why is not None and why.startswith("kv_norm_rope_insert_multilayer: ") and want in why, why
 
 
