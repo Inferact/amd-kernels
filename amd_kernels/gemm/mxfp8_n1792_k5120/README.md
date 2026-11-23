@@ -10,7 +10,7 @@ fixed-order). Producer: the mHC attention seam (bf16 hidden [M, 5120]). Consumer
 
 ## Entry points
 - Callers use the common entries: `gemm.mxfp8_common.gemm.mxfp8_linear` / `mxfp8_gemm` with `mxfp8_linear_blocker`;
-  this folder is registered in `gemm._SHAPE_HOSTS` (`linear`, `covers`).
+  this folder is registered in `gemm._ROUTES` (`linear`, `covers`).
 - `gemm.mxfp8_n1792_k5120.mxfp8_linear`: the GEMM from a bf16 activation; fresh bf16 output, graph-capture safe, `serves(m)` tells where it beat the served path.
 - `gemm.mxfp8_n1792_k5120.preshuffle_weight`: the load-time weight and scale preshuffle (32 x 32 block scales accepted).
 - `gemm.mxfp8_n1792_k5120.warmup_mxfp8_linear`: compiles every row and creates the split-K counters before graph capture.

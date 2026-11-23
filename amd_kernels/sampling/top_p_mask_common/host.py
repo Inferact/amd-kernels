@@ -37,6 +37,22 @@ def top_p_mask(logits: torch.Tensor, p: torch.Tensor, buffer: torch.Tensor | Non
     return host.top_p_mask(logits, p, buffer)
 
 
+def top_p_mask_config_blocker(vocab: int, mask_value: float = float("-inf")) -> str | None:
+    """None when a package masks rows of ``vocab`` logits with ``mask_value``: a load-time check (no logits yet)."""
+    if not routes.available():
+        return "top_p_mask: needs gfx950 with FlyDSL"
+    reason = _ROUTES.blocker((vocab,))
+    if reason is not None:
+        return reason
+    reason = _ROUTES.package((vocab,)).top_p_blocker(vocab, mask_value)
+    return None if reason is None else f"top_p_mask: {reason}"
+
+
+def warmup_top_p_mask(vocab: int, device=None) -> None:
+    """Compile every row-count variant of ``vocab``'s package (before graph capture)."""
+    _ROUTES.package((vocab,)).warmup_top_p_mask(device)
+
+
 def top_p_mask_blocker(logits: torch.Tensor, p: torch.Tensor, buffer: torch.Tensor | None = None) -> str | None:
     """None when ``top_p_mask`` serves this call, else why not (host checks only)."""
     if not routes.available():

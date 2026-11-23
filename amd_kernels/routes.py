@@ -132,16 +132,18 @@ def prepare(reason: str | None, build):
     return reason if reason is not None else build()
 
 
-def renamed(fn, old: str):
-    """``fn`` under its previous name ``old``, warning once per process that callers should switch."""
+def renamed(fn, old: str, use: str | None = None):
+    """``fn`` under its previous name ``old``, warning once per process that callers should switch to ``use``
+    (default: ``fn``'s name)."""
+    use = use or fn.__name__
 
     @functools.wraps(fn)
     def alias(*args, **kwargs):
-        _warn_once(f"amd_kernels: {old} is renamed {fn.__name__}")
+        _warn_once(f"amd_kernels: {old} is deprecated, use {use}")
         return fn(*args, **kwargs)
 
     alias.__name__ = alias.__qualname__ = old
-    alias.renamed_to = fn.__name__
+    alias.renamed_to = use
     return alias
 
 

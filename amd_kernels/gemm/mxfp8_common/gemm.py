@@ -7,7 +7,7 @@ of every MXFP8 linear (``mxfp8_linear``, ``mxfp8_gemm``, ``mxfp8_gemm_shuffled``
 Both implementations consume the same E4M3 weights and E8M0 per-32 scales.
 The AITER implementation is adapted from PR #4254 at revision 1e2e3a5 (its MXFP8 case).
 
-Each shape's rows (and kernels of its own) live in its folder (``_SHAPE_HOSTS``:
+Each shape's rows (and kernels of its own) live in its folder (``_ROUTES``:
 gemm/mxfp8_n<N>_k<K>/host.py, ``ROWS`` and ``select``); ``_select_config`` asks it and falls
 back to generic tiles for a shape without one. The switches are constants at their served
 default; ``DBO`` / ``set_dbo_query`` stand in for vLLM's ``dbo_enabled()``; and
@@ -24,6 +24,8 @@ import threading
 from dataclasses import dataclass
 
 import torch
+
+from amd_kernels.routes import Routes, previous_form
 
 
 MXFP8_VALUE_DTYPE = torch.float8_e4m3fn
@@ -80,43 +82,45 @@ _FOURWAVE_KERNELS = (_FOURWAVE_KERNEL, _FOURWAVE_NT_KERNEL)
 # ``select_prequant``, ``select_deferred``, ``decode_launcher``, and for a folder with entries of its own ``linear``
 # / ``gemm`` (serve a bf16 / row-major-codes call, or None), ``covers`` (its rows beat the served path at M) and
 # ``warmup``. The dispatcher imports a host on first use.
-_SHAPE_HOSTS = {
-    (1280, 6144): "amd_kernels.gemm.mxfp8_n1280_k6144.host",
-    (1536, 6144): "amd_kernels.gemm.mxfp8_n1536_k6144.host",
-    (1792, 5120): "amd_kernels.gemm.mxfp8_n1792_k5120.host",
-    (2304, 6144): "amd_kernels.gemm.mxfp8_n2304_k6144.host",
-    (2560, 6144): "amd_kernels.gemm.mxfp8_n2560_k6144.host",
-    (3072, 6144): "amd_kernels.gemm.mxfp8_n3072_k6144.host",
-    (4096, 1280): "amd_kernels.gemm.mxfp8_n4096_k1280.host",
-    (4608, 5120): "amd_kernels.gemm.mxfp8_n4608_k5120.host",
-    (4608, 6144): "amd_kernels.gemm.mxfp8_n4608_k6144.host",
-    (4992, 6144): "amd_kernels.gemm.mxfp8_n4992_k6144.host",
-    (5120, 2304): "amd_kernels.gemm.mxfp8_n5120_k2304.host",
-    (5120, 8192): "amd_kernels.gemm.mxfp8_n5120_k8192.host",
-    (5120, 15360): "amd_kernels.gemm.mxfp8_n5120_k15360.host",
-    (6144, 768): "amd_kernels.gemm.mxfp8_n6144_k768.host",
-    (6144, 1536): "amd_kernels.gemm.mxfp8_n6144_k1536.host",
-    (6144, 2048): "amd_kernels.gemm.mxfp8_n6144_k2048.host",
-    (6144, 3072): "amd_kernels.gemm.mxfp8_n6144_k3072.host",
-    (6144, 4096): "amd_kernels.gemm.mxfp8_n6144_k4096.host",
-    (6144, 6144): "amd_kernels.gemm.mxfp8_n6144_k6144.host",
-    (6144, 8192): "amd_kernels.gemm.mxfp8_n6144_k8192.host",
-    (12288, 6144): "amd_kernels.gemm.mxfp8_n12288_k6144.host",
-    (25600, 6144): "amd_kernels.gemm.mxfp8_n25600_k6144.host",
-    (32768, 1280): "amd_kernels.gemm.mxfp8_n32768_k1280.host",
-}
+_ROUTES = Routes(
+    "mxfp8_linear",
+    {
+        (1280, 6144): "amd_kernels.gemm.mxfp8_n1280_k6144.host",
+        (1536, 6144): "amd_kernels.gemm.mxfp8_n1536_k6144.host",
+        (1792, 5120): "amd_kernels.gemm.mxfp8_n1792_k5120.host",
+        (2304, 6144): "amd_kernels.gemm.mxfp8_n2304_k6144.host",
+        (2560, 6144): "amd_kernels.gemm.mxfp8_n2560_k6144.host",
+        (3072, 6144): "amd_kernels.gemm.mxfp8_n3072_k6144.host",
+        (4096, 1280): "amd_kernels.gemm.mxfp8_n4096_k1280.host",
+        (4608, 5120): "amd_kernels.gemm.mxfp8_n4608_k5120.host",
+        (4608, 6144): "amd_kernels.gemm.mxfp8_n4608_k6144.host",
+        (4992, 6144): "amd_kernels.gemm.mxfp8_n4992_k6144.host",
+        (5120, 2304): "amd_kernels.gemm.mxfp8_n5120_k2304.host",
+        (5120, 8192): "amd_kernels.gemm.mxfp8_n5120_k8192.host",
+        (5120, 15360): "amd_kernels.gemm.mxfp8_n5120_k15360.host",
+        (6144, 768): "amd_kernels.gemm.mxfp8_n6144_k768.host",
+        (6144, 1536): "amd_kernels.gemm.mxfp8_n6144_k1536.host",
+        (6144, 2048): "amd_kernels.gemm.mxfp8_n6144_k2048.host",
+        (6144, 3072): "amd_kernels.gemm.mxfp8_n6144_k3072.host",
+        (6144, 4096): "amd_kernels.gemm.mxfp8_n6144_k4096.host",
+        (6144, 6144): "amd_kernels.gemm.mxfp8_n6144_k6144.host",
+        (6144, 8192): "amd_kernels.gemm.mxfp8_n6144_k8192.host",
+        (12288, 6144): "amd_kernels.gemm.mxfp8_n12288_k6144.host",
+        (25600, 6144): "amd_kernels.gemm.mxfp8_n25600_k6144.host",
+        (32768, 1280): "amd_kernels.gemm.mxfp8_n32768_k1280.host",
+    },
+    ("n", "k"),
+)
 
 
-@functools.cache
 def _shape_host(n: int, k: int):
-    name = _SHAPE_HOSTS.get((n, k))
-    return importlib.import_module(name) if name is not None else None
+    return _ROUTES.host((n, k))
 
 
 @functools.cache
 def _shape_launcher(kernel: str):
     """The launch of a shape folder's kernel, or None for the common kernels."""
-    for name in _SHAPE_HOSTS.values():
+    for name in _ROUTES.hosts.values():
         launch = importlib.import_module(name).LAUNCHERS.get(kernel)
         if launch is not None:
             return launch
@@ -142,7 +146,7 @@ def _load_tuned_configs() -> dict[
 ]:
     """Every shape folder's rows (``ROWS``), by (N, K, out dtype)."""
     rows = {}
-    for n, k in _SHAPE_HOSTS:
+    for n, k in _ROUTES.hosts:
         rows.update(_shape_host(n, k).ROWS)
     return rows
 
@@ -300,7 +304,7 @@ def tuned_shapes(out_dtype: torch.dtype = torch.bfloat16) -> frozenset[tuple[int
     return frozenset((n, k) for n, k, d in _load_tuned_configs() if d == name)
 
 
-def mxfp8_linear_blocker(
+def _rows_blocker(
     m: int, n: int, k: int, out_dtype: torch.dtype = torch.bfloat16, prequant: bool = False
 ) -> str | None:
     """None when ``mxfp8_linear`` (or, with ``prequant``, ``mxfp8_gemm`` on row-major codes and scales) serves an
@@ -320,6 +324,20 @@ def mxfp8_linear_blocker(
     if out_dtype not in (torch.bfloat16, torch.float16) or (n, k) not in tuned_shapes(out_dtype):
         return f"mxfp8_linear: N {n} x K {k} has no tuned rows for {out_dtype}"
     return None
+
+
+@previous_form(_rows_blocker)
+def mxfp8_linear_blocker(x, weight, weight_scale, out_dtype: torch.dtype = torch.bfloat16, *, config=None,
+                         out=None) -> str | None:
+    """None when ``mxfp8_linear`` serves this call from its shape folder's tuned rows (and they beat the served path at
+    its row count); else the reason a caller logs before its own path."""
+    return _rows_blocker(x.shape[0], weight.shape[0], weight.shape[1], out_dtype, False)
+
+
+def mxfp8_gemm_blocker(activation, activation_scale, weight, weight_scale, out_dtype: torch.dtype = torch.bfloat16,
+                       activation_scale_preshuffled: bool = False, *, config=None, out=None) -> str | None:
+    """``mxfp8_linear_blocker`` for ``mxfp8_gemm`` on row-major MXFP8 codes."""
+    return _rows_blocker(activation.shape[0], weight.shape[0], weight.shape[1], out_dtype, True)
 
 
 def select_from_rows(

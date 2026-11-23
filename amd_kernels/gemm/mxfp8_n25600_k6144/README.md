@@ -3,7 +3,7 @@
 ## What it does
 The MXFP8 GEMM of weight shape 25600 x 6144, bf16 out: the Engram `wkv` projection of DeepSeek-V4.1-Flash at 1-768
 rows. This folder holds the shape's rows, registered with the dispatcher in
-[`../mxfp8_common`](../mxfp8_common/README.md) (`gemm._SHAPE_HOSTS`); the kernels, layouts and the numerics contract
+[`../mxfp8_common`](../mxfp8_common/README.md) (`gemm._ROUTES`); the kernels, layouts and the numerics contract
 are that folder's.
 
 ## Entry points

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the amd-kernels project
 """The MXFP8 GEMM rows and kernels of the o_proj N 6144 x K 4096 (TP2), registered with the common dispatcher
-(``gemm.mxfp8_common.gemm._SHAPE_HOSTS``)."""
+(``gemm.mxfp8_common.gemm._ROUTES``)."""
 
 import functools
 

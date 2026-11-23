@@ -10,7 +10,7 @@ fixed-order). Producer: `gemm/mxfp8_grouped_g8_n1024_k4096` MXFP8 epilogue, or b
 
 ## Entry points
 - Callers use the common entries: `gemm.mxfp8_common.gemm.mxfp8_linear` / `mxfp8_gemm` with `mxfp8_linear_blocker`;
-  this folder is registered in `gemm._SHAPE_HOSTS` (`linear`, `covers`).
+  this folder is registered in `gemm._ROUTES` (`linear`, `covers`).
 - `gemm.mxfp8_n5120_k8192.mxfp8_linear`: the GEMM from a bf16 activation; fresh bf16 output, graph-capture safe, `serves(m)` tells where it beat the served path.
 - `gemm.mxfp8_n5120_k8192.preshuffle_weight`: the load-time weight and scale preshuffle (32 x 32 block scales accepted).
 - `gemm.mxfp8_n5120_k8192.preshuffle_weight_scale`: only the scales, for the served linear's weight (no weight copy).

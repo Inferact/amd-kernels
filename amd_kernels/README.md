@@ -4,23 +4,24 @@ One line per kernel package. Each package's README has what it does, its entry p
 
 ## Op entries
 
-Callers use one shape-agnostic entry per op ([`routes.py`](routes.py), issue #11): it reads the shape from its
-tensors and calls the shape package; `<op>_blocker(...)` returns None or the reason a call is not covered (the caller
-falls back), `<op>_shapes()` the covered shape keys.
+Callers (vLLM) import ops from `amd_kernels.<category>` only, never a `*_common` module or a shape package by path;
+each category's `__init__.py` re-exports its families' `__all__` and holds no logic. The convention
+([`routes.py`](routes.py)):
 
-- `gemm.mxfp8_common.gemm`: `mxfp8_linear`, `mxfp8_gemm` (+ `mxfp8_linear_blocker`, `tuned_shapes`) over the
-  `gemm/mxfp8_n<N>_k<K>` folders in `gemm._SHAPE_HOSTS`.
-- `gemm`: `mxfp8_gate_up_swiglu_mxfp8[_prequant]` (gate_up + clamped SwiGLU + MXFP8).
-- `gemm`: `mxfp8_postmix_gemm`, `mxfp8_postmix_gates_gemm` (MXFP8 GEMM + mHC post-mix epilogue).
-- `gemm`: `mxfp8_grouped_gemm`, `mxfp8_grouped_gemm_mxfp8` (grouped MXFP8 GEMM, bf16 or MXFP8 out).
-- `gemm`: `bf16_gemm` (lm_head), `bf16_gemm_f32_bf16` (fp32 + bf16 columns in one GEMM).
-- `attention`: `sparse_mla_decode`, `rope_fp8_kv_insert`, `compressor_insert`.
-- `indexer`: `mxfp4_indexer_topk`, `mxfp4_indexer_candidate_topk`, `q_rope_mxfp4_quant`.
-- `moe`: `router_topk`, `mxfp4_experts` (+ `mxfp4_expert_weights`), `expert_parallel` (fused EP, a collective).
-- `norm`: `rmsnorm_mxfp8`, `rmsnorm_dual_mxfp8`, `mhc_post_pre_rmsnorm`, `mhc_post_collapse_rmsnorm`, `mhc_gate_finish`.
-- `activation`: `clamp_silu_mul_mxfp8`.
-- `sampling`: `markov_chain`, `rejection_sample`.
-- `engram`: `ngram_rows`, `gated_post`.
+- An op lives in a `<category>/<family>_common` package: `<op>(...)` reads its shape key from its tensors and calls
+  the shape package its `Routes` table names (imported on first use); an uncovered key raises `ValueError`.
+- `<op>_blocker(...)` takes the op's arguments (same names and order; arguments it does not read may default to None,
+  facts the tensors do not show are extra keyword-only arguments) and reads host metadata only: None when a package
+  serves the call and beats the served path at its row count (`Rows`), else the reason the caller logs before its own
+  path. The op itself still runs outside those rows (tests, benchmarks). `<op>_shapes()`: the covered keys.
+- An op that binds a weight or builds state at load time has `prepare_<op>(...)`: a `Prepared` handle (weights in the
+  kernel's layout from the checkpoint's, workspaces, communicators; compiled) whose `blocker` / `try_call` take the
+  call's arguments, or the reason. Load-time checks without an op are `<thing>_layer_blocker`, `_weight_blocker`,
+  `_config_blocker`, ...
+- Previous names (`*_unsupported_reason`, integer-argument blockers) answer as before for one tag and warn once
+  (`renamed`, `previous_form`); they are not in `__all__`.
+
+[`tests/test_entry_convention.py`](../tests/test_entry_convention.py) checks the convention for every category.
 
 ## GEMM
 
@@ -95,6 +96,8 @@ falls back), `<op>_shapes()` the covered shape keys.
   latent MoE down projection (7168 -> 3584) with the routed experts' MXFP4 activation quant fused into its epilogue.
 - [`gemm/bf16_linear_gather_n896_k35840_ranks8`](gemm/bf16_linear_gather_n896_k35840_ranks8/README.md): the drafter's
   context projection as an eight-rank N-shard GEMM with the column gather and RMSNorm in one launch.
+- [`gemm/bf16_gemm_common`](gemm/bf16_gemm_common/README.md): bf16 GEMM entries (`bf16_gemm` for lm_head / vocabulary
+  shards, `bf16_gemm_f32_bf16`): the shape -> package routing, the lm_head row ranges and `prepare_bf16_gemm`.
 
 ## MoE
 
@@ -124,6 +127,12 @@ falls back), `<op>_shapes()` the covered shape keys.
   the MoE tail on eight ranks: latent all-reduce + RMSNorm + the hidden-shard up projection of the shared output.
 - [`moe/layer_tail_k2_h7168_ranks8`](moe/layer_tail_k2_h7168_ranks8/README.md): one decode layer's whole tail in one
   persistent kernel on eight ranks: o_proj, AttnRes, router, shared + routed MXFP4 experts, latent norm, up projection.
+- [`moe/router_topk_common`](moe/router_topk_common/README.md): the sqrt-softplus top-k router entry (`router_topk`,
+  `prepare_router_topk`).
+- [`moe/mxfp4_experts_common`](moe/mxfp4_experts_common/README.md): MXFP8 x MXFP4 routed-expert entries
+  (`mxfp4_experts`, `expert_parallel`, `prepare_expert_parallel`).
+- [`moe/mxfp4_moe_common`](moe/mxfp4_moe_common/README.md): the MXFP4 MoE entry of the 6144-hidden TP shards
+  (`mxfp4_moe`, `prepare_mxfp4_moe_weights`).
 
 ## Attention
 
@@ -182,6 +191,18 @@ falls back), `<op>_shapes()` the covered shape keys.
 - [`attention/kda_mono_decode_k1_h12_d128`](attention/kda_mono_decode_k1_h12_d128/README.md): one persistent launch of
   a KDA layer's decode (AttnRes, in_proj, conv, delta-rule recurrence, gated norm) for a spec-verify step of up to 16
   rows.
+- [`attention/sparse_mla_decode_common`](attention/sparse_mla_decode_common/README.md): the sparse MLA decode entry.
+- [`attention/rope_fp8_kv_insert_common`](attention/rope_fp8_kv_insert_common/README.md): the RoPE + fp8 KV insert
+  entry.
+- [`attention/compressor_insert_common`](attention/compressor_insert_common/README.md): the compressor insert entry.
+- [`attention/gemma_norm_rope_insert_common`](attention/gemma_norm_rope_insert_common/README.md): the Gemma-norm qkv
+  norm + RoPE + fp8 insert entry.
+- [`attention/norm_rope_nvfp4_insert_common`](attention/norm_rope_nvfp4_insert_common/README.md): the norm + RoPE +
+  NVFP4 insert entries (with and without the MXFP8 QKV GEMM).
+- [`attention/nvfp4_sparse_attention_common`](attention/nvfp4_sparse_attention_common/README.md): NVFP4 sparse
+  attention entries (decode, index + decode, prefill) and the layer object (`prepare_nvfp4_sparse_layer`).
+- [`attention/swa_decode_common`](attention/swa_decode_common/README.md): the sliding-window decode entry (o_proj
+  input).
 
 ## Indexer
 
@@ -192,6 +213,9 @@ falls back), `<op>_shapes()` the covered shape keys.
   over decode rows without writing the logits.
 - [`indexer/q_rope_mxfp4_quant_h32_d128_rot64`](indexer/q_rope_mxfp4_quant_h32_d128_rot64/README.md): indexer query
   RoPE + MXFP4 quant, 32 heads of 128.
+- [`indexer/mxfp4_indexer_topk_common`](indexer/mxfp4_indexer_topk_common/README.md): the MXFP4 top-512 indexer and
+  query RoPE + MXFP4 entries (`prepare_mxfp4_indexer_topk`).
+- [`indexer/nvfp4_indexer_common`](indexer/nvfp4_indexer_common/README.md): the NVFP4 prefill top-16 indexer entry.
 
 ## Engram
 
@@ -209,6 +233,7 @@ falls back), `<op>_shapes()` the covered shape keys.
   key page.
 - [`indexer/mxfp4_prefill_topk_d128_h32_top2048`](indexer/mxfp4_prefill_topk_d128_h32_top2048/README.md): the DSA
   prefill indexer's exact top-2048 select over each row's ragged key window of the FP4 scorer's logits.
+- [`engram/engram_common`](engram/engram_common/README.md): the n-gram row pull and gated update entries.
 
 ## Embedding and activation
 
@@ -226,6 +251,8 @@ falls back), `<op>_shapes()` the covered shape keys.
   TP2 down GEMM (I 6144).
 - [`activation/clamp_silu_mul_mxfp8_i2304`](activation/clamp_silu_mul_mxfp8_i2304/README.md): clamped SiLU-mul + MXFP8
   quant for the shared expert's down GEMM.
+- [`activation/clamp_silu_mul_mxfp8_common`](activation/clamp_silu_mul_mxfp8_common/README.md): the clamped SiLU-mul +
+  MXFP8 entry.
 
 ## Norms
 
@@ -251,6 +278,10 @@ falls back), `<op>_shapes()` the covered shape keys.
   (`attnres_comm`): (hidden, world size) -> package and the reason a call has no kernel.
 - [`norm/allreduce_attnres_rmsnorm_h7168_ranks8`](norm/allreduce_attnres_rmsnorm_h7168_ranks8/README.md): eight-rank
   all-reduce + AttnRes block mix + RMSNorm of a decode step (hidden 7168, bf16).
+- [`norm/rmsnorm_mxfp8_common`](norm/rmsnorm_mxfp8_common/README.md): RMSNorm + MXFP8 and dual RMSNorm entries.
+- [`norm/mhc_common`](norm/mhc_common/README.md): the mHC seam, finisher and tail entries (seam row ranges).
+- [`norm/gemma_add_rmsnorm_common`](norm/gemma_add_rmsnorm_common/README.md): Gemma add-RMSNorm + MXFP8 and the
+  all-reduce norm / dense MLP entries (`prepare_decoder_ar_norm`, `prepare_ar_norm_dense_mlp`).
 
 ## Collectives (eight ranks)
 
@@ -280,6 +311,8 @@ falls back), `<op>_shapes()` the covered shape keys.
   sampler output gather.
 - [`collectives/all_gather_i64_c7_ranks4`](collectives/all_gather_i64_c7_ranks4/README.md): draft token ids into batch
   order.
+- [`collectives/seq_parallel_handoffs_common`](collectives/seq_parallel_handoffs_common/README.md): the
+  sequence-parallel handoff entry (`prepare_seq_parallel_handoffs`).
 
 ## Collectives (two ranks)
 
@@ -322,6 +355,10 @@ falls back), `<op>_shapes()` the covered shape keys.
   sampling of 5 draft tokens, two launches.
 - [`sampling/top_p_mask_f32_v163840`](sampling/top_p_mask_f32_v163840/README.md): top-p mask of <= 64 fp32 logits rows,
   vocabulary 163840: vLLM's split top-p chain in one launch.
+- [`sampling/markov_chain_common`](sampling/markov_chain_common/README.md): the one-launch Markov draft chain entry.
+- [`sampling/rejection_sample_common`](sampling/rejection_sample_common/README.md): the rejection sampling entry.
+- [`sampling/batch_sharded_sampling_common`](sampling/batch_sharded_sampling_common/README.md): the batch-sharded
+  sampling entry (`prepare_batch_sharded_sampling`).
 
 ## Decoder blocks
 
@@ -333,6 +370,8 @@ falls back), `<op>_shapes()` the covered shape keys.
   (`bf16_dense_mlp`): (hidden, inter) -> package and the reason a call has no kernel.
 - [`decoder/bf16_dense_mlp_h7168_i1792`](decoder/bf16_dense_mlp_h7168_i1792/README.md): the DSpark drafter's dense
   MLP shard (gate_up + SwiGLU, down) on packed bf16 operands.
+- [`decoder/dense_mxfp8_decoder_common`](decoder/dense_mxfp8_decoder_common/README.md): the dense MXFP8 decoder
+  entry (`prepare_dense_decoder`).
 
 ## Shared code
 

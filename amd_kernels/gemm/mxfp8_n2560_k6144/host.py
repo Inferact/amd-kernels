@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the amd-kernels project
 """The MXFP8 GEMM rows and kernels of the QKV projection N 2560 x K 6144 (TP4), registered with the common
-dispatcher (``gemm.mxfp8_common.gemm._SHAPE_HOSTS``): its windows ahead of ``ROWS``, the producer rows of
+dispatcher (``gemm.mxfp8_common.gemm._ROUTES``): its windows ahead of ``ROWS``, the producer rows of
 pre-quantized codes, the deferred (split-K partial) rows of the fused norm / RoPE / insert chain, and the
 launches of its two kernels (``rect_128x160``, ``prefill_192x256``)."""
 

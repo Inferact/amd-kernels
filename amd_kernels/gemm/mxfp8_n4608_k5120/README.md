@@ -10,7 +10,7 @@ fixed-order). Producer: the mHC ffn seam (bf16 [M, 5120], or its MXFP8 output). 
 
 ## Entry points
 - Callers use the common entries: `gemm.mxfp8_common.gemm.mxfp8_linear` / `mxfp8_gemm` with `mxfp8_linear_blocker`;
-  this folder is registered in `gemm._SHAPE_HOSTS` (`linear`, `covers`).
+  this folder is registered in `gemm._ROUTES` (`linear`, `covers`).
 - `gemm.mxfp8_n4608_k5120.mxfp8_linear`: the GEMM from a bf16 activation; fresh bf16 output, graph-capture safe, `serves(m)` tells where it beat the served path.
 - `gemm.mxfp8_n4608_k5120.gate_up_swiglu_mxfp8` / `gate_up_swiglu_mxfp8_prequant`: the GEMM with clamped SiLU-mul and MXFP8 quantization in the epilogue (bf16 / MXFP8 in; codes [M, 2304] + scales [M, 72] out).
 - `gemm.mxfp8_n4608_k5120.preshuffle_weight`: the load-time weight and scale preshuffle (32 x 32 block scales accepted).

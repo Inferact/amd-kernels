@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the amd-kernels project
-"""Every shape folder (``gemm._SHAPE_HOSTS``) owns its rows: the dispatcher's config at each row's window edges is
+"""Every shape folder (``gemm._ROUTES``) owns its rows: the dispatcher's config at each row's window edges is
 the folder's ``select`` where it has a row (its own kernels' windows, else its ``ROWS``); ``tuned_shapes`` is the folders'
 dtype keys; there is no common table."""
 
@@ -11,7 +11,7 @@ import torch
 
 from amd_kernels.gemm.mxfp8_common import gemm as G
 
-SHAPES = sorted(G._SHAPE_HOSTS)
+SHAPES = sorted(G._ROUTES.hosts)
 
 
 def _edges(rows):

@@ -2,7 +2,7 @@
 
 ## What it does
 The MXFP8 GEMM of weight shape 6144 x 768, bf16 out. This folder holds the shape's rows, registered with the
-dispatcher in [`../mxfp8_common`](../mxfp8_common/README.md) (`gemm._SHAPE_HOSTS`); the kernels, layouts and the
+dispatcher in [`../mxfp8_common`](../mxfp8_common/README.md) (`gemm._ROUTES`); the kernels, layouts and the
 numerics contract are that folder's.
 
 ## Entry points
