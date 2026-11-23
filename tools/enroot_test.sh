@@ -82,6 +82,10 @@ for d in "$SCRATCH" "$repo"; do
 done
 
 sqsh="$SCRATCH/images/$SQSH_NAME"
+# Calls on one node run at once (the CI's targets, two jobs on one node): one imports the image and one creates the
+# container, the others wait for it.
+exec 9> "$sqsh.lock"
+flock 9
 if [[ ! -f "$sqsh" ]]; then
     if [[ -z "$IMAGE_URL" ]]; then
         src=$IMAGE
@@ -100,6 +104,7 @@ if [[ ! -f "$sqsh" ]]; then
     (cd "$SCRATCH/images" && ls -t "$stem"-*.sqsh 2>/dev/null | tail -n +3 | xargs -r rm -f)
 fi
 enroot list | grep -qx "$NAME" || enroot create --name "$NAME" "$sqsh"
+exec 9>&-
 
 # --rc skips any image ENTRYPOINT; the rc file must sit on a local disk (enroot copies it with cp -p).
 rc="$SCRATCH/tools/norc.sh"
