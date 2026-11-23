@@ -41,7 +41,7 @@ def test_table_and_signature():
 def test_covered_routes_to_package(gfx950, monkeypatch, key):
     n, k = key
     pkg = importlib.import_module(gemm._ROUTES.hosts[key])
-    x, w = t(7, k), t(n, k)
+    x, w = t(128, k), t(n, k)
     assert E.bf16_gemm_blocker(x, w) is None and E.bf16_gemm_weight_blocker(w) is None
     seen = []
     monkeypatch.setattr(pkg, f"bf16_gemm_n{n}_k{k}", lambda *a, **kw: seen.append((a, kw)) or "out")

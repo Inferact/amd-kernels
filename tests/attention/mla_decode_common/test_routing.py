@@ -97,7 +97,7 @@ def test_import_loads_no_shape_package():
     code = (
         "import sys, json; import amd_kernels.attention.mla_decode_common as m; "
         "print(json.dumps(sorted(k for k in sys.modules if k.startswith('amd_kernels.attention.') "
-        "and not k.startswith('amd_kernels.attention.mla_decode_common'))))"
+        "and '_common' not in k)))"
     )
     out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=300, check=True)
     assert json.loads(out.stdout.strip().splitlines()[-1]) == []

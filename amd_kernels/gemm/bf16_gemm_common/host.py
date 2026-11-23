@@ -68,7 +68,7 @@ def _call(x, weight, out) -> str | None:
 
 
 def _weight_form(args, kwargs) -> bool:
-    return len(args) == 1 or (len(args) == 2 and (args[1] is None or args[1].dim() == 1)) or "bias" in kwargs
+    return len(args) == 1 or (len(args) == 2 and args[1] is None) or "bias" in kwargs
 
 
 @previous_form(bf16_gemm_weight_blocker, _weight_form)

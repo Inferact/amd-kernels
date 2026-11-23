@@ -94,7 +94,7 @@ def test_uncovered_keys_decline_with_a_reason():
         gemm.mxfp8_gate_up_swiglu_mxfp8_blocker(16, 6144, 6144),
         gemm.mxfp8_postmix_blocker(16, 5120, 8192, routed=True),
         gemm.mxfp8_grouped_gemm_blocker(16, 4, 1024, 4096),
-        gemm.bf16_gemm_blocker(meta(100032, 6144)),
+        gemm.bf16_gemm_blocker(meta(100000, 6144)),
         gemm.bf16_gemm_f32_bf16_blocker(meta(4, 7168), meta(1056, 7168), 1024),
         G.mxfp8_linear_blocker(16, 999, 5120),
     ]
