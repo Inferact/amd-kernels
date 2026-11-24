@@ -6,13 +6,10 @@ Writing rules for code and docs in this repository. The kernel rules are in [REA
   hardware hazard, a measured crossover, an ordering a caller relies on).
 - No history in code, docstrings or READMEs: no superseded variants, dates or commit references. Git history and PR
   bodies hold them.
-- Code or ideas taken from another project (AITER, Triton, CK, FlashInfer, SGLang, a paper's code, any other) follow
-  that project's license and name it, as vllm-project/vllm#58659 does for AITER. That is attribution, not history.
-  - Copied or adapted code: after this repo's SPDX lines, `# Portions adapted from <project> (<URL of the PR or
-    file>):`, then the source's SPDX license line and its copyright line.
-  - The module docstring names what came from where: the functions, kernel or technique, and the source PR or file
-    at its revision. A borrowed idea without copied code gets this sentence only.
-  - No license, or one this repo cannot take (GPL), means no copy. The PR body says what was adapted from where.
+- Code or ideas taken from another project (AITER, Triton, CK, FlashInfer, SGLang, a paper's code, any other) name
+  their source, as vllm-project/vllm#58659 does for AITER: a `# Adapted from <project> (<URL of the PR or file>)` line
+  after this repo's SPDX lines, and one docstring sentence on what came from where (the functions, kernel or
+  technique; the PR or file at its revision). That is attribution, not history.
 - A constant chosen by measurement gets at most one line: the result and where the sweep lives.
 - Docstrings: a one-line summary; Google-style `Args:` / `Returns:` only where a parameter is not obvious from its name
   and type.
