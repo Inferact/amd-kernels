@@ -7,9 +7,20 @@ Writing rules for code and docs in this repository. The kernel rules are in [REA
 - No history in code, docstrings or READMEs: no superseded variants, dates or commit references. Git history and PR
   bodies hold them.
 - Code or ideas taken from another project (AITER, Triton, CK, FlashInfer, SGLang, a paper's code, any other) name
-  their source, as vllm-project/vllm#58659 does for AITER: a `# Adapted from <project> (<URL of the PR or file>)` line
-  after this repo's SPDX lines, and one docstring sentence on what came from where (the functions, kernel or
-  technique; the PR or file at its revision). That is attribution, not history.
+  their source: one header line after this repo's SPDX lines with the project and the URL of the PR or file, and one
+  module docstring sentence on which functions, kernel or technique came from it. That is attribution, not history.
+
+  ```python
+  # SPDX-License-Identifier: Apache-2.0
+  # SPDX-FileCopyrightText: Copyright contributors to the amd-kernels project
+
+  # Portions adapted from ROCm/aiter (https://github.com/ROCm/aiter/pull/5750)
+  """MXFP8 GEMM on 32x32 block-scaled weights.
+
+  The packed kernel and the in-launch split-K reduction (``_split_tile``, ``_sum_splits``) are adapted from the
+  group32 GEMM in ROCm/aiter#5750.
+  """
+  ```
 - A constant chosen by measurement gets at most one line: the result and where the sweep lives.
 - Docstrings: a one-line summary; Google-style `Args:` / `Returns:` only where a parameter is not obvious from its name
   and type.
