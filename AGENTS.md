@@ -28,6 +28,8 @@ Writing rules for code and docs in this repository. The kernel rules are in [REA
   group32 GEMM in ROCm/aiter#5750.
   """
   ```
+- No comparison with AITER (an AITER kernel, or a vLLM path that runs one) in READMEs, docstrings or comments: our
+  kernels are tuned for these shapes and AITER's were not, so the comparison is not fair.
 - A constant chosen by measurement gets at most one line: the result and where the sweep lives.
 - Docstrings: a one-line summary; Google-style `Args:` / `Returns:` only where a parameter is not obvious from its name
   and type.
