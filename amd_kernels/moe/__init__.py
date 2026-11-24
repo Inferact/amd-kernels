@@ -149,3 +149,10 @@ def fused_ep_expert_weights(w13, w13_scale, w2, w2_scale, *, world: int, top_k: 
     ``shuffled``: AITER-shuffled bytes used as they are, no copy)."""
     key = (world, hidden or 2 * w13.shape[2], inter or w13.shape[1] // 2, top_k)
     return _expert_weights(_FUSED_EP.package(key), w13, w13_scale, w2, w2_scale, shuffled)
+
+
+def prefill_top16_mxfp4(logits, latent, bias, routed_scaling_factor=1.0, valid_rows=None):
+    """Select top-16 of 896 experts and quantize the 3584-column latent in one launch."""
+    from .router_sigmoid_bias_top16_e896_h7168 import prefill_top16_mxfp4 as run
+
+    return run(logits, latent, bias, routed_scaling_factor, valid_rows)
