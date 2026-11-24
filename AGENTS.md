@@ -7,14 +7,21 @@ Writing rules for code and docs in this repository. The kernel rules are in [REA
 - No history in code, docstrings or READMEs: no superseded variants, dates or commit references. Git history and PR
   bodies hold them.
 - Code or ideas taken from another project (AITER, Triton, CK, FlashInfer, SGLang, a paper's code, any other) name
-  their source: one header line after this repo's SPDX lines with the project and the URL of the PR or file, and one
-  module docstring sentence on which functions, kernel or technique came from it. That is attribution, not history.
+  their source. That is attribution, not history.
+  - Copied or adapted code: after this repo's SPDX lines, a `# Portions adapted from` line with the project and the
+    URL of the PR, the source file's path and revision when there is one, then the source file's SPDX license line
+    and copyright line as they are (no license text).
+  - The module docstring says in one sentence which functions, kernel or technique came from it. A borrowed idea
+    without copied code gets this sentence only.
 
   ```python
   # SPDX-License-Identifier: Apache-2.0
   # SPDX-FileCopyrightText: Copyright contributors to the amd-kernels project
 
-  # Portions adapted from ROCm/aiter (https://github.com/ROCm/aiter/pull/5750)
+  # Portions adapted from ROCm/aiter (https://github.com/ROCm/aiter/pull/5750),
+  # aiter/ops/triton/_triton_kernels/gemm/basic/gemm_a8w8_blockscale_group32.py at e2d019f:
+  # SPDX-License-Identifier: MIT
+  # Copyright (C) 2026, Advanced Micro Devices, Inc. All rights reserved.
   """MXFP8 GEMM on 32x32 block-scaled weights.
 
   The packed kernel and the in-launch split-K reduction (``_split_tile``, ``_sum_splits``) are adapted from the
