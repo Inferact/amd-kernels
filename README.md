@@ -6,10 +6,13 @@ Every kernel package and its entry points: [amd_kernels/README.md](amd_kernels/R
 
 ## Purpose and status
 
-The library gives vLLM day-0 kernel support for new models on AMD GPUs: the kernels a model needs on MI355X, written
-and tuned when the model lands. Today it serves vLLM only, and its Python API follows what vLLM's model code needs, so
-it may change without notice: do not depend on it directly. We plan to offer these kernels as an
-[AITER plugin](https://github.com/ROCm/aiter/blob/main/aiter/plugin/README.md) later.
+amd-kernels is a small staging area on top of [AITER](https://github.com/ROCm/aiter) for vLLM day-0 support of new
+models on AMD GPUs. Most kernels here are AITER kernels with small changes for a new model's shapes, dtypes or fusions,
+and each file names the AITER file or PR it came from. We thank the AITER authors: this library builds on their work.
+
+A kernel stays here only until AITER supports its model. Then vLLM calls AITER and the copy here is deleted. Today the
+library serves vLLM only, and its Python API follows what vLLM's model code needs, so it may change without notice: do
+not depend on it directly.
 
 ## Requirements
 
@@ -94,7 +97,7 @@ Writing rules for code and docs: [AGENTS.md](AGENTS.md).
 - [FlyDSL](https://github.com/ROCm/FlyDSL): every kernel here is written in it and compiled by it.
 - [AITER](https://github.com/ROCm/aiter): the shared FlyDSL helpers in [`common/`](amd_kernels/common/) (buffer ops,
   launch helpers, the HIP runtime binding) come from AITER's FlyDSL kernels, as do the MXFP8 GEMM's preshuffled
-  scaled-MFMA kernel and its scale layout; AITER's kernels are the baselines many benchmarks compare against.
+  scaled-MFMA kernel and its scale layout, and most kernels start from AITER kernels.
 - [TokenSpeed kernels](https://github.com/lightseekorg/tokenspeed) (`tokenspeed-kernel`): the kernel contract this
   library follows, a PyTorch reference as the ground truth that tests compare against, standalone graph-replay
   benchmarks and a check for compiles while serving.
