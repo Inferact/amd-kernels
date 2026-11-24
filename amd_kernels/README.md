@@ -109,6 +109,7 @@ falls back), `<op>_shapes()` the covered shape keys.
   experts, top 3, H 5120 I 2304.
 - [`moe/fused_ep_mxfp4_h5120_i2304_e48_top6_ranks8`](moe/fused_ep_mxfp4_h5120_i2304_e48_top6_ranks8/README.md):
   one-launch expert-parallel MoE on eight ranks: dispatch, experts, combine.
+- [`moe/fused_ep_mxfp4_h3584_i3072_e112_top16_ranks8`](moe/fused_ep_mxfp4_h3584_i3072_e112_top16_ranks8/README.md): EP8 top-16 routed experts with SiTUv2, H 3584 and I 3072.
 - [`moe/router_sqrtsoftplus_top6_h5120_e384`](moe/router_sqrtsoftplus_top6_h5120_e384/README.md): router: gate GEMM
   and biased sqrt-softplus top-6 of 384 experts.
 - [`moe/router_sqrtsoftplus_top3_h5120_e128`](moe/router_sqrtsoftplus_top3_h5120_e128/README.md): router: gate GEMM

@@ -23,13 +23,22 @@ def _cos(a, b):
             torch.nn.functional.cosine_similarity(a.double(), b.double(), dim=1).min().item())
 
 
-def worker(rank, errors, epr, cases, graph_cases):
+def worker(rank, errors, epr, cases, graph_cases, package=None):
     from flydsl.compiler.jit_function import MlirCompiler
 
+    if package is None:
+        parallel, weights, reference, inputs = ExpertParallel, ExpertWeights, ref, wl
+    else:
+        from importlib import import_module
+        mod = import_module(f"amd_kernels.moe.{package}")
+        parallel, weights = mod.ExpertParallel, mod.ExpertWeights
+        reference = import_module(f"{mod.__name__}.reference")
+        inputs = import_module(f"tests.moe.{package}.workload")
+
     dev = torch.device("cuda", torch.cuda.current_device())
-    raws = [wl.make_experts(100 + r, dev, epr) for r in range(WORLD)]
-    w = ExpertWeights.from_row_major(*raws[rank])
-    ep = ExpertParallel(rank, WORLD, dist.group.WORLD, dev, epr=epr)
+    raws = [inputs.make_experts(100 + r, dev, epr) for r in range(WORLD)]
+    w = weights.from_row_major(*raws[rank])
+    ep = parallel(rank, WORLD, dist.group.WORLD, dev, epr=epr)
     ep.warm_up(w)
     orig = MlirCompiler.compile
 
@@ -40,12 +49,12 @@ def worker(rank, errors, epr, cases, graph_cases):
     try:
         for ci, (kind, counts, bf16, bad_ids) in enumerate(cases):
             m = counts[rank]
-            ids, tw = wl.make_routes(max(m, 1), WORLD, kind, 31 * ci + rank, dev, epr)
+            ids, tw = inputs.make_routes(max(m, 1), WORLD, kind, 31 * ci + rank, dev, epr)
             ids, tw = ids[:m], tw[:m]
             if bad_ids and m > 2:
                 ids[1, 2] = -1
                 ids[2, 0] = epr * WORLD + 5
-            x, codes, scales = wl.make_tokens(max(m, 1), 77 * ci + rank, dev)
+            x, codes, scales = inputs.make_tokens(max(m, 1), 77 * ci + rank, dev)
             x, codes, scales = x[:m], codes[:m], scales[:m]
             args = (x, None) if bf16 else (codes, scales)
             out = ep(*args, w, tw, ids)
@@ -56,7 +65,7 @@ def worker(rank, errors, epr, cases, graph_cases):
             if not torch.equal(out, again):
                 errors.append(f"{tag}: two runs differ")
             # other tokens on the same routes (the same arena rows and slots), then the first tokens again
-            x2, c2, s2 = wl.make_tokens(max(m, 1), 1000 + 77 * ci + rank, dev)
+            x2, c2, s2 = inputs.make_tokens(max(m, 1), 1000 + 77 * ci + rank, dev)
             ep(*((x2[:m], None) if bf16 else (c2[:m], s2[:m])), w, tw, ids)
             third = ep(*args, w, tw, ids)
             torch.cuda.synchronize()
@@ -64,8 +73,8 @@ def worker(rank, errors, epr, cases, graph_cases):
                 errors.append(f"{tag}: the run after other tokens on the same routes differs")
             k = min(m, CHECKED)
             if k:
-                q, s = ref.quantize_mxfp8(x[:k]) if bf16 else (codes[:k], scales[:k])
-                want = ref.ep_reference(q, s, raws, tw[:k], ids[:k])
+                q, s = reference.quantize_mxfp8(x[:k]) if bf16 else (codes[:k], scales[:k])
+                want = reference.ep_reference(q, s, raws, tw[:k], ids[:k])
                 cos, row = _cos(out[:k], want)
                 if not (cos >= 0.99999 and row >= 0.9999):
                     errors.append(f"{tag}: cosine {cos:.7f}, worst row {row:.6f}")
@@ -74,15 +83,15 @@ def worker(rank, errors, epr, cases, graph_cases):
         # CUDA graph: replay with new inputs equals the eager run on them, bit for bit
         for graph_counts in graph_cases:
             m = graph_counts[rank]
-            sx, _, _ = wl.make_tokens(max(m, 1), 5 + rank, dev)
-            sids, stw = wl.make_routes(max(m, 1), WORLD, "uniform", 9 + rank, dev, epr)
+            sx, _, _ = inputs.make_tokens(max(m, 1), 5 + rank, dev)
+            sids, stw = inputs.make_routes(max(m, 1), WORLD, "uniform", 9 + rank, dev, epr)
             sx, sids, stw = sx[:m], sids[:m], stw[:m]
             g = torch.cuda.CUDAGraph()
             with torch.cuda.graph(g):
                 gout = ep(sx, None, w, stw, sids)
             for seed in (1, 2, 3):
-                nx, _, _ = wl.make_tokens(max(m, 1), seed * 10 + rank, dev)
-                nids, ntw = wl.make_routes(max(m, 1), WORLD, "uniform", seed * 10 + rank, dev, epr)
+                nx, _, _ = inputs.make_tokens(max(m, 1), seed * 10 + rank, dev)
+                nids, ntw = inputs.make_routes(max(m, 1), WORLD, "uniform", seed * 10 + rank, dev, epr)
                 sx.copy_(nx[:m])
                 sids.copy_(nids[:m])
                 stw.copy_(ntw[:m])

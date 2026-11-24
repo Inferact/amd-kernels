@@ -21,7 +21,11 @@ _EXPERTS = Routes(
     },
 )
 _FUSED_EP = Routes(
-    "expert_parallel", {(8, 5120, 2304, 6): "amd_kernels.moe.fused_ep_mxfp4_h5120_i2304_e48_top6_ranks8"}
+    "expert_parallel",
+    {
+        (8, 5120, 2304, 6): "amd_kernels.moe.fused_ep_mxfp4_h5120_i2304_e48_top6_ranks8",
+        (8, 3584, 3072, 16): "amd_kernels.moe.fused_ep_mxfp4_h3584_i3072_e112_top16_ranks8",
+    },
 )
 
 
@@ -128,13 +132,15 @@ def expert_parallel_blocker(world: int, hidden: int, inter: int, top_k: int, exp
 
 
 def expert_parallel(rank: int, world: int, group, device, *, hidden: int, inter: int, top_k: int,
-                    experts_per_rank: int = 48):  # fmt: skip
+                    experts_per_rank: int | None = None):  # fmt: skip
     """One rank's fused EP MoE (IPC pool, control words, scratch): a collective, created on every rank before graph
     capture, one per process for every layer. ``ep(x, x_scales, w, topk_weights, topk_ids, out=None,
     rows_hint=None)`` runs a layer; every rank calls every layer (an idle rank with 0 rows), one call in flight per
     device; ``ep.warm_up(w)`` compiles every token tier (a collective)."""
     key = (world, hidden, inter, top_k)
-    return _FUSED_EP.package(key).ExpertParallel(rank, world, group, device, epr=experts_per_rank)
+    package = _FUSED_EP.package(key)
+    count = package.host.E if experts_per_rank is None else experts_per_rank
+    return package.ExpertParallel(rank, world, group, device, epr=count)
 
 
 def fused_ep_expert_weights(w13, w13_scale, w2, w2_scale, *, world: int, top_k: int, hidden: int | None = None,
