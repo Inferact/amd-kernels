@@ -169,6 +169,9 @@ falls back), `<op>_shapes()` the covered shape keys.
   output and LSE of the rank's key share.
 - [`attention/dcp8_lse_combine_vup_mla_h12_kv512`](attention/dcp8_lse_combine_vup_mla_h12_kv512/README.md): the DCP8
   MLA decode combine: W_UV up-projection, owner-rank push and LSE-weighted combine in one launch.
+- [`attention/dcp8_lse_combine_packed_h16_v192`](attention/dcp8_lse_combine_packed_h16_v192/README.md): the DCP8
+  decode combine of packed partials (16 heads per rank, value dim 192, base-2 LSE): owner-rank push and LSE-weighted
+  combine in one launch, bit-exact against vLLM's a2a merge.
 - [`attention/fp8_dense_mla_decode_h96_kv512`](attention/fp8_dense_mla_decode_h96_kv512/README.md): the DSpark draft's
   dense MLA decode (96 latent heads, e4m3 q and latent KV, causal round-robin DCP shard).
 - [`attention/kda_common`](attention/kda_common/README.md): KDA entries (`kda_decode_fb_gate_spec`, `kda_prefill`,
