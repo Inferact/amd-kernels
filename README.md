@@ -1,10 +1,10 @@
 # amd-kernels
 
 amd-kernels is a small staging area on top of [AITER](https://github.com/ROCm/aiter) for vLLM day-0 support of new
-models on AMD GPUs. Most kernels here are AITER kernels with small changes for a new model's shapes, dtypes or fusions,
-and each file names the AITER file or PR it came from. We thank the AITER authors: this library builds on their work.
+models on AMD GPUs. Most kernels here are **AITER** kernels with small changes for a new model's shapes, dtypes or fusions,
+and each file names the **AITER** file or PR it came from. We thank the **AITER** authors: this library builds on their work.
 
-A kernel stays here only until AITER supports its model. Then vLLM calls AITER and the copy here is deleted. Today the
+The kernels stay here only for day-0 model support. After upstream prs merged, vLLM calls **AITER** and the copy here is deleted. Today the
 library serves vLLM only, and its Python API follows what vLLM's model code needs, so it may change without notice: do
 not depend on it directly. Every kernel package and its entry points: [amd_kernels/README.md](amd_kernels/README.md).
 
