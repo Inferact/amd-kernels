@@ -11,29 +11,24 @@ import importlib
 import torch
 import torch.distributed as dist
 
-from . import available
+from amd_kernels import routes
+from amd_kernels.routes import Routes, prepare, renamed
 
 OP = "bf16_linear_gather"
 _DIMS = ("n_shard", "k", "world")
-_SHAPE_HOSTS = {
+_ROUTES = Routes(OP, {
     (896, 35840, 8): "amd_kernels.gemm.bf16_linear_gather_n896_k35840_ranks8.host",
-}
-
-
-@functools.cache
-def _shape_host(key: tuple):
-    name = _SHAPE_HOSTS.get(key)
-    return importlib.import_module(name) if name is not None else None
+}, _DIMS)
 
 
 @functools.cache
 def _comm_key(cls: type):
-    return next((key for key in _SHAPE_HOSTS if getattr(_shape_host(key), cls.__name__, None) is cls), None)
+    # the communicator class lives in a submodule the host re-exports, so ``_ROUTES.owner`` cannot see it
+    return next((key for key in _ROUTES.hosts if getattr(_ROUTES.host(key), cls.__name__, None) is cls), None)
 
 
-@functools.cache
 def _weight_key(shape: tuple):
-    return next((key for key in _SHAPE_HOSTS if key[:2] == shape), None)
+    return next((key for key in _ROUTES.hosts if key[:2] == shape), None)
 
 
 @functools.cache
@@ -46,41 +41,47 @@ def _max_rows(host) -> int:
 
 
 def _no_kernel(op: str, key: tuple) -> str:
-    dims = ", ".join(f"{d}={v}" for d, v in zip(_DIMS, key))
-    return f"{op}: no kernel for {dims} (covered: {sorted(_SHAPE_HOSTS)})"
+    return Routes(op, _ROUTES.hosts, _DIMS).blocker(key)
 
 
 def _weight_host(op: str, w: torch.Tensor):
     key = _weight_key(tuple(w.shape))
     if key is None:
         raise ValueError(_no_kernel(op, tuple(w.shape)))
-    return _shape_host(key)
+    return _ROUTES.host(key)
 
 
 def bf16_linear_gather_shapes() -> frozenset[tuple[int, int, int]]:
     """The covered (N shard, K, world)."""
-    return frozenset(_SHAPE_HOSTS)
+    return _ROUTES.shapes()
 
 
 def linear_gather_comm(rank: int, group, device, *, n_shard: int, k: int):
     """The routed package's communicator (collective on the group; its ``close()`` is collective too)."""
     key = (n_shard, k, dist.get_world_size(group))
-    host = _shape_host(key)
+    host = _ROUTES.host(key)
     if host is None:
         raise ValueError(_no_kernel("linear_gather_comm", key))
     return host.ProjComm(rank, group, device)
 
 
-def linear_gather_comm_unsupported_reason(rank: int, group, device, *, n_shard: int, k: int) -> str | None:
+def linear_gather_comm_blocker(rank: int, group, device, *, n_shard: int, k: int) -> str | None:
+    """None if ``linear_gather_comm`` builds a communicator for these arguments, else why not."""
     op = "linear_gather_comm"
-    if not available():
+    if not routes.available():
         return f"{op}: needs gfx950 with FlyDSL"
     key = (n_shard, k, dist.get_world_size(group))
-    if _shape_host(key) is None:
+    if _ROUTES.host(key) is None:
         return _no_kernel(op, key)
     if dist.get_rank(group) != rank:
         return f"{op}: rank {rank} is not this process's rank {dist.get_rank(group)} in the group"
     return None
+
+
+def prepare_linear_gather_comm(rank: int, group, device, *, n_shard: int, k: int):
+    """``linear_gather_comm(...)``, or the reason it cannot be built."""
+    return prepare(linear_gather_comm_blocker(rank, group, device, n_shard=n_shard, k=k),
+                   lambda: linear_gather_comm(rank, group, device, n_shard=n_shard, k=k))
 
 
 def linear_gather_pack_weight(w: torch.Tensor) -> torch.Tensor:
@@ -104,15 +105,16 @@ def linear_gather_pack_aux(aux: list[torch.Tensor], out: torch.Tensor, rows: int
     return _weight_host("linear_gather_pack_aux", w_packed).pack_aux(aux, out, rows)
 
 
-def linear_gather_pack_aux_unsupported_reason(aux: list[torch.Tensor], out: torch.Tensor, rows: int, *,
-                                              w_packed: torch.Tensor) -> str | None:
+def linear_gather_pack_aux_blocker(aux: list[torch.Tensor], out: torch.Tensor, rows: int, *,
+                                   w_packed: torch.Tensor) -> str | None:
+    """None if ``linear_gather_pack_aux`` serves this call, else why not (host checks only)."""
     op = "linear_gather_pack_aux"
-    if not available():
+    if not routes.available():
         return f"{op}: needs gfx950 with FlyDSL"
     key = _weight_key(tuple(w_packed.shape))
     if key is None:
         return _no_kernel(op, tuple(w_packed.shape))
-    host = _shape_host(key)
+    host = _ROUTES.host(key)
     k, layers, hi = key[1], _layers(host), _max_rows(host)
     if not 1 <= rows <= hi:
         return f"{op}: {rows} rows (the kernel takes 1..{hi})"
@@ -133,19 +135,18 @@ def bf16_linear_gather(comm, x_packed: torch.Tensor, w_packed: torch.Tensor, nor
     key = _comm_key(type(comm))
     if key is None:
         raise ValueError(f"{OP}: no kernel for communicator {type(comm).__qualname__}")
-    return _shape_host(key).context_proj_gather_norm(comm, x_packed, w_packed, norm_weight, rows, eps, out)
+    return _ROUTES.host(key).context_proj_gather_norm(comm, x_packed, w_packed, norm_weight, rows, eps, out)
 
 
-def bf16_linear_gather_unsupported_reason(comm, x_packed: torch.Tensor, w_packed: torch.Tensor,
-                                          norm_weight: torch.Tensor, rows: int, eps: float = 1e-5,
-                                          out: torch.Tensor | None = None) -> str | None:
+def bf16_linear_gather_blocker(comm, x_packed: torch.Tensor, w_packed: torch.Tensor, norm_weight: torch.Tensor,
+                               rows: int, eps: float = 1e-5, out: torch.Tensor | None = None) -> str | None:
     """None if ``bf16_linear_gather`` serves this call, else why not (host checks only)."""
-    if not available():
+    if not routes.available():
         return f"{OP}: needs gfx950 with FlyDSL"
     key = _comm_key(type(comm))
     if key is None:
-        return f"{OP}: no kernel for communicator {type(comm).__qualname__} (covered: {sorted(_SHAPE_HOSTS)})"
-    host = _shape_host(key)
+        return f"{OP}: no kernel for communicator {type(comm).__qualname__} (covered: {sorted(_ROUTES.hosts)})"
+    host = _ROUTES.host(key)
     n_shard, k, world = key
     if tuple(w_packed.shape) != (n_shard, k):
         return f"{OP}: communicator built for {key}, call is {(*w_packed.shape, world)}"
@@ -169,3 +170,9 @@ def bf16_linear_gather_unsupported_reason(comm, x_packed: torch.Tensor, w_packed
                             or not out.is_contiguous() or out.device != dev):
         return f"{OP}: out must be contiguous bf16 [{rows}, {n_full}] on the communicator's device"
     return None
+
+
+linear_gather_comm_unsupported_reason = renamed(linear_gather_comm_blocker, "linear_gather_comm_unsupported_reason")
+linear_gather_pack_aux_unsupported_reason = renamed(linear_gather_pack_aux_blocker,
+                                                    "linear_gather_pack_aux_unsupported_reason")
+bf16_linear_gather_unsupported_reason = renamed(bf16_linear_gather_blocker, "bf16_linear_gather_unsupported_reason")

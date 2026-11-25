@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the amd-kernels project
 """The MXFP8 GEMM rows and kernels of the full o_proj N 6144 x K 8192 (``o_proj_full`` of the TP4
-sequence-parallel prefill), registered with the common dispatcher (``gemm.mxfp8_common.gemm._SHAPE_HOSTS``): its
+sequence-parallel prefill), registered with the common dispatcher (``gemm.mxfp8_common.gemm._ROUTES``): its
 windows ahead of ``ROWS``, the 256x192 persistent tile (also the o_proj's K 2048 row at 3329-3968, see
 ``gemm/mxfp8_n6144_k2048``), and its one-tile and split-2 forms (the split-2 form with its ready words,
 ``split2_ready``)."""

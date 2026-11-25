@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the amd-kernels project
 """The MXFP8 GEMM rows and kernels of the o_proj N 6144 x K 2048 (TP4), registered with the common dispatcher
-(``gemm.mxfp8_common.gemm._SHAPE_HOSTS``): its windows ahead of ``ROWS`` (the 128x192 tile here, the
+(``gemm.mxfp8_common.gemm._ROUTES``): its windows ahead of ``ROWS`` (the 128x192 tile here, the
 256x192 persistent tile of ``gemm/mxfp8_n6144_k8192`` at K 2048), the producer rows of pre-quantized codes, and
 the decode row whose activation stages through LDS (``decode_astage``)."""
 

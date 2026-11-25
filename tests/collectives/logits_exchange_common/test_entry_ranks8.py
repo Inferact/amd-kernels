@@ -23,10 +23,9 @@ def _counts(rows, world, empty=()):
 
 def worker(rank, errors):
     from amd_kernels import compile_watch, warm_up
-    from amd_kernels.collectives.logits_exchange_common import (logits_exchange_comm,
-                                                                logits_exchange_comm_unsupported_reason,
-                                                                logits_gemm_exchange_shapes,
-                                                                logits_gemm_exchange_unsupported_reason)
+    from amd_kernels.collectives.logits_exchange_common import (logits_exchange_comm, logits_exchange_comm_blocker,
+                                                                logits_gemm_exchange_blocker,
+                                                                logits_gemm_exchange_shapes)
     from amd_kernels.collectives.logits_exchange_common import host as entry
     from amd_kernels.decoder.bf16_dense_mlp_common import bf16_dense_mlp_shapes, dense_mlp_workspace
 
@@ -38,11 +37,11 @@ def worker(rank, errors):
         errors.append(f"rank {rank}: no covered shape for {dist.get_world_size(group)} ranks")
     for key in keys:
         n, k, world = key
-        host = importlib.import_module(entry._SHAPE_HOSTS[key])
+        host = importlib.import_module(entry._ROUTES.hosts[key])
         gemm_name, op, _ = entry._GEMMS[key]
         gemm = getattr(importlib.import_module(gemm_name), op)
         max_rows = host.RECV_ROWS
-        reason = logits_exchange_comm_unsupported_reason(rank, group, dev, n_shard=n, k=k, max_rows=max_rows)
+        reason = logits_exchange_comm_blocker(rank, group, dev, n_shard=n, k=k, max_rows=max_rows)
         if reason is not None:
             errors.append(f"rank {rank}: {reason}")
             return
@@ -63,7 +62,7 @@ def worker(rank, errors):
             cs = None if counts is None else torch.tensor(counts, dtype=torch.int32, device=dev)
             recv = rows if counts is None else counts[rank]
             buf = i % host.BUFFERS
-            r = logits_gemm_exchange_unsupported_reason(comm, x, w, idx, cs, buf)
+            r = logits_gemm_exchange_blocker(comm, x, w, idx, cs, buf)
             if r is not None:
                 errors.append(f"rank {rank}: {r}")
             comm.gemm_exchange(x, w, idx, cs, buf)
@@ -109,15 +108,15 @@ def worker(rank, errors):
         hidden, inter = min(bf16_dense_mlp_shapes())
         other = dense_mlp_workspace(dev, hidden=hidden, inter=inter)
         idx = idx_all[:8].contiguous()
-        r = logits_gemm_exchange_unsupported_reason(other, x, w, idx)
+        r = logits_gemm_exchange_blocker(other, x, w, idx)
         if r is None or "no kernel for communicator" not in r:
             errors.append(f"rank {rank}: another entry's object: {r}")
-        r = logits_gemm_exchange_unsupported_reason(comm, x, w[: n // 2], idx)
+        r = logits_gemm_exchange_blocker(comm, x, w[: n // 2], idx)
         if r is None or "communicator built for" not in r:
             errors.append(f"rank {rank}: weight of another shape: {r}")
         comm.close()
         direct.close()
-        r = logits_gemm_exchange_unsupported_reason(comm, x, w, idx)
+        r = logits_gemm_exchange_blocker(comm, x, w, idx)
         if r is None or "closed" not in r:
             errors.append(f"rank {rank}: closed communicator: {r}")
 
@@ -134,7 +133,7 @@ def one_buffer_worker(rank, errors):
 
     dev = torch.device("cuda", rank)
     group = dist.group.WORLD
-    (key, name), = entry._SHAPE_HOSTS.items()
+    (key, name), = entry._ROUTES.hosts.items()
     n, k, _ = key
     host = importlib.import_module(name)
     one = logits_exchange_comm(rank, group, dev, n_shard=n, k=k, max_rows=40, buffers=1)

@@ -14,7 +14,7 @@ package that serves it, so the caller imports no shape package:
 Head counts, layers, page size and cache dtype are the package's compile modes, not keys. The Gemma-norm packages
 (`norm_rope_fp8_insert_d128_rot64`) have another numerics contract and are not routed here. Arguments, dtypes and the
 numerics contract are the routed package's (its `reference.py`); the entry's q and caches are bit for bit those of
-the direct package call. For a call no package serves, `*_unsupported_reason` (the op's own arguments) returns a
+the direct package call. For a call no package serves, `*_blocker` (the op's own arguments) returns a
 one-line reason and the caller falls back; it reads only shapes, dtypes, strides and host values (no device read,
 safe inside CUDA graph capture). The op itself only looks its key up and raises `ValueError` with the same "no kernel
 for" text off the table.
@@ -22,16 +22,16 @@ for" text off the table.
 ## Entry points
 
 - `norm_rope_insert_common.available`: gfx950 with FlyDSL importable (load-time check).
-- `norm_rope_insert_common.rope_unsupported_reason`: whether a layer's RoPE (head size, rotary dims, NeoX, cos / sin
+- `norm_rope_insert_common.norm_rope_insert_rope_blocker`: whether a layer's RoPE (head size, rotary dims, NeoX, cos / sin
   cache) fits a kernel of this family (the ops cannot see the RoPE style).
 - `norm_rope_insert_common.qkv_norm_rope_insert`: q / k norm + RoPE of one layer's fused qkv rows into the caller's
-  q, and the K / V insert of the tokens with slots; `qkv_norm_rope_insert_unsupported_reason`,
+  q, and the K / V insert of the tokens with slots; `qkv_norm_rope_insert_blocker`,
   `qkv_norm_rope_insert_shapes` (covered keys), `qkv_norm_rope_insert_kernel` (the routed warm-up entry).
 - `norm_rope_insert_common.kv_norm_rope_insert_multilayer`: K norm + RoPE and the K / V inserts of the context rows
-  into every layer's cache; `kv_norm_rope_insert_multilayer_unsupported_reason`, `kv_norm_rope_insert_multilayer_shapes`,
+  into every layer's cache; `kv_norm_rope_insert_multilayer_blocker`, `kv_norm_rope_insert_multilayer_shapes`,
   `kv_norm_rope_insert_multilayer_kernel`.
 
-Dispatch: `_SHAPE_HOSTS` in `qkv.py`, `multilayer.py` (key -> module name); a shape package is imported on the first
+Dispatch: `_ROUTES` (`amd_kernels.routes.Routes`) in `qkv.py`, `multilayer.py`; a shape package is imported on the first
 call of its key.
 
 ## Performance

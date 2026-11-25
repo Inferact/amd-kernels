@@ -1,82 +1,68 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the amd-kernels project
 """One attention layer's q / k RMS norm + RoPE + K / V insert: routes a call by (head_dim, rotary_dim) of its norm
-weight and cos / sin cache to the shape package (``_SHAPE_HOSTS``, imported on the first call of its key)."""
-
-import functools
-import importlib
+weight and cos / sin cache to the shape package (``_ROUTES``, imported on the first call of its key)."""
 
 import torch
 
-from . import device as _dev
+from amd_kernels import routes
+from amd_kernels.routes import Routes, renamed
 
-_SHAPE_HOSTS = {(64, 64): "amd_kernels.attention.norm_rope_insert_d64_rot64"}
-_OP = "qkv_norm_rope_insert"
-
-
-@functools.cache
-def _shape_host(key):
-    name = _SHAPE_HOSTS.get(key)
-    return importlib.import_module(name) if name is not None else None
+_NAMES = ("head_dim", "rotary_dim")
+_ROUTES = Routes("qkv_norm_rope_insert", {(64, 64): "amd_kernels.attention.norm_rope_insert_d64_rot64"}, _NAMES)
+_ROPE = Routes("rope", _ROUTES.hosts, _NAMES)
+_OP = _ROUTES.op
 
 
-@functools.cache
 def _op_module(key):
-    return importlib.import_module(_SHAPE_HOSTS[key] + ".qkv_norm_rope_insert")
+    return _ROUTES.module(key, "qkv_norm_rope_insert")
 
 
 def _key(norm_weight, cos_sin_cache):
     return (norm_weight.numel(), cos_sin_cache.shape[-1])
 
 
-def _no_kernel(key, op=_OP):
-    return f"{op}: no kernel for head_dim={key[0]}, rotary_dim={key[1]} (covered: {sorted(_SHAPE_HOSTS)})"
-
-
 def qkv_norm_rope_insert_shapes() -> frozenset[tuple[int, int]]:
     """The (head_dim, rotary_dim) with a kernel."""
-    return frozenset(_SHAPE_HOSTS)
+    return _ROUTES.shapes()
 
 
-def rope_unsupported_reason(head_size: int, rotary_dim: int, is_neox: bool, cos_sin_cache: torch.Tensor) -> str | None:
+def norm_rope_insert_rope_blocker(head_size: int, rotary_dim: int, is_neox: bool,
+                                  cos_sin_cache: torch.Tensor) -> str | None:
     """None when a layer's RoPE (head size, rotary dims, NeoX or not, its cos / sin cache) fits a kernel of this
     family, else why not: a load-time check (the ops cannot see the RoPE style)."""
     key = (head_size, rotary_dim)
-    if _shape_host(key) is None:
-        return _no_kernel(key, "rope")
-    reason = _shape_host(key).rope_blocker(head_size, rotary_dim, is_neox, cos_sin_cache)
+    reason = _ROPE.blocker(key)
+    if reason is not None:
+        return reason
+    reason = _ROPE.package(key).rope_blocker(head_size, rotary_dim, is_neox, cos_sin_cache)
     return None if reason is None else f"rope: {reason}"
 
 
 def qkv_norm_rope_insert_kernel(qkv, positions, q_norm_weight, k_norm_weight, cos_sin_cache, eps, num_heads,
                                 num_kv_heads, q_out, kv_cache=None, slot_mapping=None, k_scale=None, v_scale=None):
     """The routed ``amd_kernels.warm_up`` entry (to compile without launching)."""
-    key = _key(q_norm_weight, cos_sin_cache)
-    if _shape_host(key) is None:
-        raise ValueError(_no_kernel(key))
-    return _op_module(key).qkv_norm_rope_insert
+    return _op_module(_key(q_norm_weight, cos_sin_cache)).qkv_norm_rope_insert
 
 
 def qkv_norm_rope_insert(qkv, positions, q_norm_weight, k_norm_weight, cos_sin_cache, eps, num_heads, num_kv_heads,
                          q_out, kv_cache=None, slot_mapping=None, k_scale=None, v_scale=None):
     """q_out = RoPE(norm(q)) of one layer's fused qkv rows; with ``kv_cache``, RoPE(norm(k)) and v of the tokens with
     slots go into the cache (the routed package's ``qkv_norm_rope_insert``)."""
-    key = _key(q_norm_weight, cos_sin_cache)
-    if _shape_host(key) is None:
-        raise ValueError(_no_kernel(key))
-    _op_module(key).qkv_norm_rope_insert(qkv, positions, q_norm_weight, k_norm_weight, cos_sin_cache, eps, num_heads,
+    _op_module(_key(q_norm_weight, cos_sin_cache)).qkv_norm_rope_insert(qkv, positions, q_norm_weight, k_norm_weight, cos_sin_cache, eps, num_heads,
                                          num_kv_heads, q_out, kv_cache, slot_mapping, k_scale, v_scale)
 
 
-def qkv_norm_rope_insert_unsupported_reason(qkv, positions, q_norm_weight, k_norm_weight, cos_sin_cache, eps,
-                                            num_heads, num_kv_heads, q_out, kv_cache=None, slot_mapping=None,
-                                            k_scale=None, v_scale=None) -> str | None:
+def qkv_norm_rope_insert_blocker(qkv, positions, q_norm_weight, k_norm_weight, cos_sin_cache, eps, num_heads,
+                                 num_kv_heads, q_out, kv_cache=None, slot_mapping=None, k_scale=None,
+                                 v_scale=None) -> str | None:
     """None when ``qkv_norm_rope_insert`` serves this call, else why not (host checks only)."""
-    if not _dev.available():
+    if not routes.available():
         return f"{_OP}: needs gfx950 with FlyDSL"
     key = _key(q_norm_weight, cos_sin_cache)
-    if _shape_host(key) is None:
-        return _no_kernel(key)
+    reason = _ROUTES.blocker(key)
+    if reason is not None:
+        return reason
     d = key[0]
     nq, nkv = num_heads, num_kv_heads
     n = qkv.shape[0] if qkv.dim() == 2 else -1
@@ -106,3 +92,8 @@ def qkv_norm_rope_insert_unsupported_reason(qkv, positions, q_norm_weight, k_nor
                               and k_scale.dtype == v_scale.dtype == torch.float32):
         return f"{_OP}: an e4m3 cache needs fp32 k / v scales"
     return None
+
+
+qkv_norm_rope_insert_unsupported_reason = renamed(qkv_norm_rope_insert_blocker,
+                                                  "qkv_norm_rope_insert_unsupported_reason")
+rope_unsupported_reason = renamed(norm_rope_insert_rope_blocker, "rope_unsupported_reason")

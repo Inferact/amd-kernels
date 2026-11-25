@@ -4,7 +4,7 @@
 The full attention output projection of MiniMax-M3.1-Flash (K 8192 = 64 heads x 128, N 6144, bf16 out) that the TP4
 sequence-parallel prefill runs on each rank's token shard: 1024-8192 rows per rank for 4096-32768-token steps. The rows
 and kernels of this shape, registered with the dispatcher in [`../mxfp8_common`](../mxfp8_common/README.md)
-(`gemm._SHAPE_HOSTS`); layouts and the numerics contract are that folder's. Callers: `mxfp8_gemm` with row-major codes
+(`gemm._ROUTES`); layouts and the numerics contract are that folder's. Callers: `mxfp8_gemm` with row-major codes
 and preshuffled scales (`collectives/seq_parallel_handoffs_h6144_q2048_ranks4`, the SP o_proj). No TP4 call has fewer
 than 1024 rows; the rows below keep the decode chain's choices.
 

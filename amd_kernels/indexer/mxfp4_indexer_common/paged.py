@@ -6,22 +6,15 @@ The scratch helpers (``paged_score_topk_prefer`` / ``_preallocate`` / ``_reset_c
 exist: they route by (top-k, page rows) of the output and the index cache.
 """
 
-import functools
-import importlib
-
 import torch
 
-from .device import available
+from amd_kernels import routes
+from amd_kernels.routes import Routes, renamed
 
-_OP = "mxfp4_paged_score_topk"
-_DIMS = ("heads", "d", "topk", "page_rows")
-_SHAPE_HOSTS = {(32, 128, 2048, 64): "amd_kernels.indexer.mxfp4_paged_score_topk_d128_h32_top2048"}
-
-
-@functools.cache
-def _shape_host(key):
-    name = _SHAPE_HOSTS.get(key)
-    return importlib.import_module(name) if name is not None else None
+_ROUTES = Routes("mxfp4_paged_score_topk",
+                 {(32, 128, 2048, 64): "amd_kernels.indexer.mxfp4_paged_score_topk_d128_h32_top2048"},
+                 ("heads", "d", "topk", "page_rows"))
+_OP = _ROUTES.op
 
 
 def _key(q_payload, out_indices, cache):
@@ -31,22 +24,22 @@ def _key(q_payload, out_indices, cache):
 
 
 def _no_kernel(key) -> str:
-    dims = "these operand ranks" if key is None else ", ".join(f"{n}={v}" for n, v in zip(_DIMS, key, strict=True))
-    return f"{_OP}: no kernel for {dims} (covered: {', '.join(map(str, sorted(_SHAPE_HOSTS)))})"
+    if key is None:
+        return f"{_OP}: no kernel for these operand ranks (covered: {sorted(_ROUTES.hosts)})"
+    return _ROUTES.blocker(key)
 
 
 def _route(q_payload, out_indices, cache):
     key = _key(q_payload, out_indices, cache)
-    host = _shape_host(key)
+    host = _ROUTES.host(key)
     if host is None:
         raise ValueError(_no_kernel(key))
     return host
 
 
-@functools.cache
 def _tail_host(tail):
-    keys = [k for k in _SHAPE_HOSTS if k[2:] == tail]
-    return _shape_host(keys[0]) if len(keys) == 1 else None
+    keys = [k for k in _ROUTES.hosts if k[2:] == tail]
+    return _ROUTES.host(keys[0]) if len(keys) == 1 else None
 
 
 def _scratch_host(cache, out_indices, need: bool):
@@ -73,17 +66,16 @@ def mxfp4_paged_score_topk_kernel(q_payload, q_scales, weights, cache, block_tab
 
 def mxfp4_paged_score_topk_shapes() -> frozenset:
     """The covered (heads, d, top-k, page rows)."""
-    return frozenset(_SHAPE_HOSTS)
+    return _ROUTES.shapes()
 
 
-def mxfp4_paged_score_topk_unsupported_reason(q_payload, q_scales, weights, cache, block_table, query_start_loc,
-                                              row_ends, max_query_len, out_indices, out_scores,
-                                              uniform=False) -> str | None:
+def mxfp4_paged_score_topk_blocker(q_payload, q_scales, weights, cache, block_table, query_start_loc, row_ends,
+                                   max_query_len, out_indices, out_scores, uniform=False) -> str | None:
     """None when ``mxfp4_paged_score_topk`` serves this call, else why not (host checks only)."""
-    if not available():
+    if not routes.available():
         return f"{_OP}: needs gfx950 with FlyDSL"
     key = _key(q_payload, out_indices, cache)
-    pkg = _shape_host(key)
+    pkg = _ROUTES.host(key)
     if pkg is None:
         return _no_kernel(key)
     heads, d, topk, page = key
@@ -159,3 +151,7 @@ def paged_score_topk_reset_counts(query_start_loc, max_query_len, *, cache, out_
     tile = pkg.host.plan(max_query_len, batch)[0]
     groups = batch * -(-max_query_len // tile)
     pkg.host._scratch(cache.device)[4][: groups * pkg.geometry.COUNTER_BYTES // 4].zero_()
+
+
+mxfp4_paged_score_topk_unsupported_reason = renamed(mxfp4_paged_score_topk_blocker,
+                                                    "mxfp4_paged_score_topk_unsupported_reason")

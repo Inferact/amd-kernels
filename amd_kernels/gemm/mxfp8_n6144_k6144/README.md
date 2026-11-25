@@ -3,7 +3,7 @@
 ## What it does
 The MXFP8 GEMM of weight shape 6144 x 6144, bf16 out: the dense gate_up at I 3072 per rank and the dense down
 projection at I 6144 per rank (the same GEMM, so one set of rows). This folder holds the shape's rows, registered with
-the dispatcher in [`../mxfp8_common`](../mxfp8_common/README.md) (`gemm._SHAPE_HOSTS`); the kernels, layouts and the
+the dispatcher in [`../mxfp8_common`](../mxfp8_common/README.md) (`gemm._ROUTES`); the kernels, layouts and the
 numerics contract are that folder's.
 
 ## Entry points

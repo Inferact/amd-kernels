@@ -10,17 +10,17 @@ own top-p.
 
 ## Entry points
 - `top_p_mask_common.top_p_mask`: the mask; the routed package's function, which warms itself up on its first call.
-- `top_p_mask_common.top_p_mask_unsupported_reason`: None when `top_p_mask` serves these arguments, else why not
+- `top_p_mask_common.top_p_mask_blocker`: None when `top_p_mask` serves these arguments, else why not
   (host checks only, safe inside graph capture); the caller asks once per call and falls back on a reason.
 - `top_p_mask_common.top_p_mask_shapes`: the covered (V,) keys, for a caller deciding at load time.
 - `top_p_mask_common.available`: gfx950 with FlyDSL importable.
 
-Dispatch: `host._SHAPE_HOSTS` maps (V,) to the package, imported on its first call.
+Dispatch: `host._ROUTES` (`amd_kernels.routes.Routes`) maps (V,) to the package, imported on its first call.
 
 ## Performance
 The entry adds the dispatch only: a graph holds the package's kernels, the eager call one dict lookup. One MI355X,
 min of 20 rounds; graph replay of 40 masks on their own rows (restored before every replay); host us per eager call
-from a 100-call enqueue loop; reason = `top_p_mask_unsupported_reason`.
+from a 100-call enqueue loop; reason = `top_p_mask_blocker`.
 
 | vocab, rows | replay direct us | replay entry us | host direct us | host entry us | added us | reason us |
 |---|---|---|---|---|---|---|

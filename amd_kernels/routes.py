@@ -1,14 +1,29 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the amd-kernels project
-"""Shape-agnostic op entries (one per op contract): a call's shape key -> the shape package that serves it.
+"""Op entries: the one way callers reach a kernel (``amd_kernels/README.md``, "Op entries").
 
-The category modules (``amd_kernels.<category>``) hold the entries: ``<op>`` reads the key from its tensors and calls
-the shape package, ``<op>_blocker`` answers on host metadata alone (None: covered, else the reason a caller logs before
-it falls back to its own path), ``<op>_shapes`` lists the covered keys. Shape packages are imported on first use.
+Callers import ops from ``amd_kernels.<category>`` only. An op's implementation lives in a ``<family>_common``
+package: ``<op>`` reads its shape key from its tensors and calls the shape package that ``Routes`` names for it,
+``<op>_blocker`` takes the same arguments and answers on host metadata alone (None: served, else the reason a caller
+logs before it falls back to its own path), ``<op>_shapes`` lists the covered keys. An op that binds weights or builds
+state at load time has ``prepare_<op>``: a ``Prepared`` handle or the reason it cannot serve. Shape packages are
+imported on first use.
 """
 
 import functools
 import importlib
+import importlib.util
+import warnings
+
+
+@functools.cache
+def available() -> bool:
+    """gfx950 with FlyDSL importable (what every shape package needs)."""
+    import torch
+
+    if not torch.cuda.is_available() or importlib.util.find_spec("flydsl") is None:
+        return False
+    return torch.cuda.get_device_properties(0).gcnArchName.split(":")[0] == "gfx950"
 
 
 @functools.cache
@@ -17,19 +32,33 @@ def _import(name: str):
 
 
 class Routes:
-    """One op's registry: shape key -> the shape package (dotted module name) that serves it."""
+    """One op's registry: shape key -> the shape package (dotted module name) that serves it.
 
-    def __init__(self, op: str, hosts: dict):
+    ``names`` labels the key's fields in the reason text; without it the key is printed as is.
+    """
+
+    def __init__(self, op: str, hosts: dict, names: tuple[str, ...] | None = None):
         self.op = op
         self.hosts = dict(hosts)
+        self.names = names
 
     def shapes(self) -> frozenset:
         return frozenset(self.hosts)
 
+    def describe(self, key) -> str:
+        if self.names is None or not isinstance(key, tuple):
+            return str(key)
+        return ", ".join(f"{n}={v}" for n, v in zip(self.names, key))
+
     def blocker(self, key) -> str | None:
         if key in self.hosts:
             return None
-        return f"{self.op}: no shape package for {key} (covered: {sorted(self.hosts)})"
+        return f"{self.op}: no kernel for {self.describe(key)} (covered: {sorted(self.hosts)})"
+
+    def host(self, key):
+        """The shape package of ``key``, or None."""
+        name = self.hosts.get(key)
+        return None if name is None else _import(name)
 
     def package(self, key):
         """The shape package of ``key``; ValueError with the blocker's reason when none serves it."""
@@ -37,6 +66,55 @@ class Routes:
         if name is None:
             raise ValueError(self.blocker(key))
         return _import(name)
+
+    def module(self, key, name: str):
+        """Module ``name`` inside the shape package of ``key``."""
+        self.package(key)
+        return _import(f"{self.hosts[key]}.{name}")
+
+    def owner(self, cls) -> object | None:
+        """The key whose shape package defines ``cls`` (the type of an object an entry built), or None."""
+        mod = cls.__module__
+        for key, name in self.hosts.items():
+            root = name.removesuffix(".host")
+            if mod == root or mod.startswith(root + "."):
+                return key
+        return None
+
+
+class Rows:
+    """The row counts at which a kernel beat the path a caller serves otherwise (``spans``: inclusive ranges)."""
+
+    def __init__(self, *spans: tuple[int, int]):
+        self.spans = spans
+
+    def __contains__(self, m: int) -> bool:
+        return any(lo <= m <= hi for lo, hi in self.spans)
+
+    def blocker(self, op: str, m: int) -> str | None:
+        if m in self:
+            return None
+        wins = ", ".join(f"{lo}-{hi}" for lo, hi in self.spans)
+        return f"{op}: at {m} rows the served path is faster (this kernel wins at {wins})"
+
+
+class Prepared:
+    """What ``prepare_<op>`` returns: the op bound to its load-time state (weights in the kernel's layout, workspaces,
+    communicators), compiled. ``blocker`` takes the call's arguments, as ``<op>_blocker`` does."""
+
+    op = ""
+
+    def blocker(self, *args, **kwargs) -> str | None:
+        raise NotImplementedError
+
+    def __call__(self, *args, **kwargs):
+        raise NotImplementedError
+
+    def try_call(self, *args, **kwargs):
+        """The op's result, or None (nothing launched) when ``blocker`` declines the call."""
+        if self.blocker(*args, **kwargs) is not None:
+            return None
+        return self(*args, **kwargs)
 
 
 def first(*reasons: str | None) -> str | None:
@@ -47,3 +125,55 @@ def first(*reasons: str | None) -> str | None:
 def check(reason: str | None) -> None:
     if reason is not None:
         raise ValueError(reason)
+
+
+def prepare(reason: str | None, build):
+    """``reason`` when it is set, else ``build()``: the body of a ``prepare_<op>`` over a blocker and a constructor."""
+    return reason if reason is not None else build()
+
+
+def renamed(fn, old: str, use: str | None = None):
+    """``fn`` under its previous name ``old``, warning once per process that callers should switch to ``use``
+    (default: ``fn``'s name)."""
+    use = use or fn.__name__
+
+    @functools.wraps(fn)
+    def alias(*args, **kwargs):
+        _warn_once(f"amd_kernels: {old} is deprecated, use {use}")
+        return fn(*args, **kwargs)
+
+    alias.__name__ = alias.__qualname__ = old
+    alias.renamed_to = use
+    return alias
+
+
+def _leading_int(args, kwargs) -> bool:
+    return bool(args) and type(args[0]) is int
+
+
+def previous_form(legacy, when=_leading_int):
+    """Let a blocker that now takes its op's arguments also answer a call in its previous form (``when(args,
+    kwargs)``, by default a leading int), through ``legacy``, warning once per process."""
+
+    def wrap(fn):
+        @functools.wraps(fn)
+        def blocker(*args, **kwargs):
+            if when(args, kwargs):
+                _warn_once(f"amd_kernels: {fn.__name__} takes its op's arguments; the previous form is deprecated")
+                return legacy(*args, **kwargs)
+            return fn(*args, **kwargs)
+
+        blocker.previous_form = legacy
+        return blocker
+
+    return wrap
+
+
+def arity(n: int):
+    """``when`` for ``previous_form``: the call has exactly ``n`` positional arguments and no keywords."""
+    return lambda args, kwargs: len(args) == n and not kwargs
+
+
+@functools.cache
+def _warn_once(message: str) -> None:
+    warnings.warn(message, DeprecationWarning, stacklevel=3)

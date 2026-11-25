@@ -1,81 +1,57 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the amd-kernels project
 """Entry of the all-reduce + AttnRes block mix + RMSNorm, routed by (hidden, world size). The communicator is built per
-key; the op is its method ``comm.allreduce_attnres_rmsnorm(...)``, which
-``allreduce_attnres_rmsnorm_unsupported_reason`` checks."""
-import functools
-import importlib
-
+key; the op is its method ``comm.allreduce_attnres_rmsnorm(...)``, which ``allreduce_attnres_rmsnorm_blocker``
+checks."""
 import torch
 import torch.distributed as dist
 
-_SHAPE_HOSTS = {(7168, 8): "amd_kernels.norm.allreduce_attnres_rmsnorm_h7168_ranks8.host"}  # hidden, world
+from amd_kernels import routes
+from amd_kernels.routes import Routes, available, prepare, renamed
+
 _NAMES = ("hidden", "world")
-_OP = "allreduce_attnres_rmsnorm"
-
-
-@functools.cache
-def available() -> bool:
-    """gfx950 with FlyDSL importable."""
-    if not torch.cuda.is_available() or "gfx950" not in torch.cuda.get_device_properties(0).gcnArchName:
-        return False
-    try:
-        import flydsl  # noqa: F401
-    except ImportError:
-        return False
-    return True
-
-
-@functools.cache
-def _shape_host(key):
-    name = _SHAPE_HOSTS.get(key)
-    return importlib.import_module(name) if name is not None else None
-
-
-def _dims(key) -> str:
-    return ", ".join(f"{n}={v}" for n, v in zip(_NAMES, key))
-
-
-def _no_kernel(op, key) -> str:
-    return f"{op}: no kernel for {_dims(key)} (covered: {', '.join(str(k) for k in sorted(_SHAPE_HOSTS))})"
+_ROUTES = Routes("allreduce_attnres_rmsnorm",
+                 {(7168, 8): "amd_kernels.norm.allreduce_attnres_rmsnorm_h7168_ranks8.host"}, _NAMES)
+_COMM = Routes("attnres_comm", _ROUTES.hosts, _NAMES)
+_OP = _ROUTES.op
 
 
 def attnres_comm(rank, group, device, *, hidden):
     """The communicator of this rank (collective over ``group``; ``.close()`` after the work completes)."""
-    key = (hidden, dist.get_world_size(group))
-    host = _shape_host(key)
-    if host is None:
-        raise ValueError(_no_kernel("attnres_comm", key))
-    return host.AttnResComm(rank, group, device)
+    return _COMM.package((hidden, dist.get_world_size(group))).AttnResComm(rank, group, device)
 
 
-def attnres_comm_unsupported_reason(rank, group, device, *, hidden) -> str | None:
-    if not available():
+def attnres_comm_blocker(rank, group, device, *, hidden) -> str | None:
+    if not routes.available():
         return "attnres_comm: needs gfx950 with FlyDSL"
-    key = (hidden, dist.get_world_size(group))
-    return None if key in _SHAPE_HOSTS else _no_kernel("attnres_comm", key)
+    return _COMM.blocker((hidden, dist.get_world_size(group)))
+
+
+def prepare_attnres_comm(rank, group, device, *, hidden):
+    """The communicator of this rank, or the reason none serves this key."""
+    return prepare(attnres_comm_blocker(rank, group, device, hidden=hidden),
+                   lambda: attnres_comm(rank, group, device, hidden=hidden))
 
 
 def allreduce_attnres_rmsnorm_shapes() -> frozenset:
-    return frozenset(_SHAPE_HOSTS)
+    return _ROUTES.shapes()
 
 
-def allreduce_attnres_rmsnorm_unsupported_reason(comm, partial, prefix, bank, norm_weight, qk_weight, num_blocks,
-                                                 block_write_idx=-1, out_norm_weight=None, eps=1e-6,
-                                                 out_norm_eps=1e-6, reduce=True, out_packed=False) -> str | None:
+def allreduce_attnres_rmsnorm_blocker(comm, partial, prefix, bank, norm_weight, qk_weight, num_blocks,
+                                      block_write_idx=-1, out_norm_weight=None, eps=1e-6, out_norm_eps=1e-6,
+                                      reduce=True, out_packed=False) -> str | None:
     """None when ``comm.allreduce_attnres_rmsnorm`` serves these arguments, else why not."""
-    if not available():
+    if not routes.available():
         return f"{_OP}: needs gfx950 with FlyDSL"
-    key = next((k for k, name in _SHAPE_HOSTS.items() if type(comm).__module__ == name), None)
+    key = _ROUTES.owner(type(comm))
     if key is None:
-        return (f"{_OP}: no kernel for a {type(comm).__qualname__} "
-                f"(covered: {', '.join(str(k) for k in sorted(_SHAPE_HOSTS))})")
-    host = _shape_host(key)
+        return f"{_OP}: no kernel for a {type(comm).__qualname__} (covered: {sorted(_ROUTES.hosts)})"
+    host = _ROUTES.package(key)
     if not comm.bufs:
         return f"{_OP}: communicator is closed"
     h, dev = key[0], comm.device
     if partial.ndim != 2 or partial.shape[1] != h:
-        return f"{_OP}: communicator built for {_dims(key)}, call is hidden={partial.shape[-1]}"
+        return f"{_OP}: communicator built for {_ROUTES.describe(key)}, call is hidden={partial.shape[-1]}"
     m = partial.shape[0]
     if not 1 <= m <= host.MAX_ROWS:
         return f"{_OP}: {m} rows (the kernel takes 1..{host.MAX_ROWS})"
@@ -98,3 +74,8 @@ def allreduce_attnres_rmsnorm_unsupported_reason(comm, partial, prefix, bank, no
         if w is not None and (w.numel() != h or w.dtype != partial.dtype or w.stride(-1) != 1 or w.device != dev):
             return f"{_OP}: weights must be contiguous bf16 [{h}]"
     return None
+
+
+attnres_comm_unsupported_reason = renamed(attnres_comm_blocker, "attnres_comm_unsupported_reason")
+allreduce_attnres_rmsnorm_unsupported_reason = renamed(allreduce_attnres_rmsnorm_blocker,
+                                                       "allreduce_attnres_rmsnorm_unsupported_reason")

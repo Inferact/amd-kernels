@@ -3,86 +3,81 @@
 """Entry of the latent tail (all-reduce of the routed latent partial, RMSNorm, this rank's up-projection rows added to
 the shared output), routed by (up-projection rows, latent width, world size). The communicator is built per key; its
 calls route by the communicator."""
-import functools
-import importlib
-
 import torch
 import torch.distributed as dist
 
+from amd_kernels import routes
+from amd_kernels.routes import Routes, prepare, renamed
+
 from . import dispatch
 
-# up_weight [up_rows, latent], world
-_SHAPE_HOSTS = {(896, 3584, 8): "amd_kernels.moe.allreduce_latent_rmsnorm_up_proj_h3584_n896_ranks8.host"}
-_NAMES = ("up_rows", "latent", "world")
+_NAMES = ("up_rows", "latent", "world")  # up_weight [up_rows, latent], world
+_ROUTES = Routes("allreduce_latent_rmsnorm_up_proj",
+                 {(896, 3584, 8): "amd_kernels.moe.allreduce_latent_rmsnorm_up_proj_h3584_n896_ranks8.host"}, _NAMES)
+_SLOTS = Routes("allreduce_slots_rmsnorm_up_proj", _ROUTES.hosts, _NAMES)
+_COMM = Routes("latent_tail_comm", _ROUTES.hosts, _NAMES)
 
 
-@functools.cache
-def _shape_host(key):
-    name = _SHAPE_HOSTS.get(key)
-    return importlib.import_module(name) if name is not None else None
-
-
-@functools.cache
-def _comm_host(cls, op):
-    key = dispatch.key_of_type(_SHAPE_HOSTS, cls)
+def _comm_host(op_routes, cls):
+    key = op_routes.owner(cls)
     if key is None:
-        raise ValueError(dispatch.no_kernel_for_type(op, cls, _SHAPE_HOSTS))
-    return _shape_host(key)
+        raise ValueError(dispatch.not_owned(op_routes, cls))
+    return op_routes.package(key)
 
 
 def latent_tail_comm(rank, group, device, *, up_rows, latent, fused=True):
     """The communicator of this rank (collective over ``group``; ``.close()`` after the work completes)."""
-    key = (up_rows, latent, dist.get_world_size(group))
-    host = _shape_host(key)
-    if host is None:
-        raise ValueError(dispatch.no_kernel("latent_tail_comm", _NAMES, key, _SHAPE_HOSTS))
+    host = _COMM.package((up_rows, latent, dist.get_world_size(group)))
     return host.LatentTailComm(rank, group, device, fused=fused)
 
 
-def latent_tail_comm_unsupported_reason(rank, group, device, *, up_rows, latent, fused=True) -> str | None:
-    op = "latent_tail_comm"
-    if not dispatch.available():
-        return f"{op}: needs gfx950 with FlyDSL"
-    key = (up_rows, latent, dist.get_world_size(group))
-    if key not in _SHAPE_HOSTS:
-        return dispatch.no_kernel(op, _NAMES, key, _SHAPE_HOSTS)
-    return None
+def latent_tail_comm_blocker(rank, group, device, *, up_rows, latent, fused=True) -> str | None:
+    if not routes.available():
+        return f"{_COMM.op}: needs gfx950 with FlyDSL"
+    return _COMM.blocker((up_rows, latent, dist.get_world_size(group)))
+
+
+def prepare_latent_tail_comm(rank, group, device, *, up_rows, latent, fused=True):
+    """The communicator of this rank, or the reason none serves this key."""
+    return prepare(latent_tail_comm_blocker(rank, group, device, up_rows=up_rows, latent=latent, fused=fused),
+                   lambda: latent_tail_comm(rank, group, device, up_rows=up_rows, latent=latent, fused=fused))
 
 
 def allreduce_latent_rmsnorm_up_proj(comm, partial, norm_weight, up_weight, shared, out=None, eps=1e-6):
     """``out = shared + rmsnorm(allreduce(partial)) @ up_weight^T`` (``out`` defaults to ``shared``, in place)."""
-    return _comm_host(type(comm), "allreduce_latent_rmsnorm_up_proj").allreduce_latent_rmsnorm_up_proj(
+    return _comm_host(_ROUTES, type(comm)).allreduce_latent_rmsnorm_up_proj(
         comm, partial, norm_weight, up_weight, shared, out, eps)
 
 
 def allreduce_slots_rmsnorm_up_proj(comm, slots, reverse_sorted, norm_weight, up_weight, shared, out=None, eps=1e-6):
     """The same with the experts' slot sum folded in: ``slots`` the slot buffer (``mxfp4_moe_experts(reduce=False)``),
     ``reverse_sorted`` the sort's row of each (token, slot)."""
-    return _comm_host(type(comm), "allreduce_slots_rmsnorm_up_proj").allreduce_slots_rmsnorm_up_proj(
+    return _comm_host(_SLOTS, type(comm)).allreduce_slots_rmsnorm_up_proj(
         comm, slots, reverse_sorted, norm_weight, up_weight, shared, out, eps)
 
 
 def allreduce_latent_rmsnorm_up_proj_shapes() -> frozenset:
-    return frozenset(_SHAPE_HOSTS)
+    return _ROUTES.shapes()
 
 
 def allreduce_slots_rmsnorm_up_proj_shapes() -> frozenset:
-    return frozenset(_SHAPE_HOSTS)
+    return _SLOTS.shapes()
 
 
-def _reason(op, comm, x, reverse_sorted, norm_weight, up_weight, shared, out):
-    if not dispatch.available():
+def _blocker(op_routes, comm, x, reverse_sorted, norm_weight, up_weight, shared, out):
+    op = op_routes.op
+    if not routes.available():
         return f"{op}: needs gfx950 with FlyDSL"
-    key = dispatch.key_of_type(_SHAPE_HOSTS, type(comm))
+    key = op_routes.owner(type(comm))
     if key is None:
-        return dispatch.no_kernel_for_type(op, type(comm), _SHAPE_HOSTS)
-    host = _shape_host(key)
+        return dispatch.not_owned(op_routes, type(comm))
+    host = op_routes.package(key)
     if not comm.bufs:
         return f"{op}: communicator is closed"
     n, k = key[0], key[1]
     call = tuple(up_weight.shape)
     if call != (n, k):
-        return dispatch.built_for(op, _NAMES, key, call)
+        return dispatch.built_for(op_routes, key, call)
     slots = reverse_sorted is not None
     dev = comm.device
     if slots:
@@ -92,7 +87,7 @@ def _reason(op, comm, x, reverse_sorted, norm_weight, up_weight, shared, out):
     if not 1 <= m <= hi:
         return f"{op}: {m} rows (the kernel takes 1..{hi})"
     if x.ndim != 2 or x.shape[1] != k:
-        return dispatch.built_for(op, _NAMES, key, (n, x.shape[-1]))
+        return dispatch.built_for(op_routes, key, (n, x.shape[-1]))
     if slots and (reverse_sorted.dtype != torch.int32 or reverse_sorted.device != dev
                   or not reverse_sorted.is_contiguous() or not x.is_contiguous()
                   or reverse_sorted.numel() != m * host.T.SLOTS):
@@ -110,13 +105,20 @@ def _reason(op, comm, x, reverse_sorted, norm_weight, up_weight, shared, out):
     return None
 
 
-def allreduce_latent_rmsnorm_up_proj_unsupported_reason(comm, partial, norm_weight, up_weight, shared, out=None,
-                                                        eps=1e-6) -> str | None:
-    return _reason("allreduce_latent_rmsnorm_up_proj", comm, partial, None, norm_weight, up_weight, shared, out)
+def allreduce_latent_rmsnorm_up_proj_blocker(comm, partial, norm_weight, up_weight, shared, out=None,
+                                             eps=1e-6) -> str | None:
+    return _blocker(_ROUTES, comm, partial, None, norm_weight, up_weight, shared, out)
 
 
-def allreduce_slots_rmsnorm_up_proj_unsupported_reason(comm, slots, reverse_sorted, norm_weight, up_weight, shared,
-                                                       out=None, eps=1e-6) -> str | None:
+def allreduce_slots_rmsnorm_up_proj_blocker(comm, slots, reverse_sorted, norm_weight, up_weight, shared, out=None,
+                                            eps=1e-6) -> str | None:
     if reverse_sorted is None:
-        return "allreduce_slots_rmsnorm_up_proj: needs reverse_sorted"
-    return _reason("allreduce_slots_rmsnorm_up_proj", comm, slots, reverse_sorted, norm_weight, up_weight, shared, out)
+        return f"{_SLOTS.op}: needs reverse_sorted"
+    return _blocker(_SLOTS, comm, slots, reverse_sorted, norm_weight, up_weight, shared, out)
+
+
+latent_tail_comm_unsupported_reason = renamed(latent_tail_comm_blocker, "latent_tail_comm_unsupported_reason")
+allreduce_latent_rmsnorm_up_proj_unsupported_reason = renamed(allreduce_latent_rmsnorm_up_proj_blocker,
+                                                              "allreduce_latent_rmsnorm_up_proj_unsupported_reason")
+allreduce_slots_rmsnorm_up_proj_unsupported_reason = renamed(allreduce_slots_rmsnorm_up_proj_blocker,
+                                                             "allreduce_slots_rmsnorm_up_proj_unsupported_reason")

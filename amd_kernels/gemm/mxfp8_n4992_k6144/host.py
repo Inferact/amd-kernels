@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the amd-kernels project
 """The MXFP8 GEMM rows and kernels of the QKV projection N 4992 x K 6144 (TP2), registered with the common
-dispatcher (``gemm.mxfp8_common.gemm._SHAPE_HOSTS``): every bf16 row of the shape (``ROWS`` only lists the shape), the
+dispatcher (``gemm.mxfp8_common.gemm._ROUTES``): every bf16 row of the shape (``ROWS`` only lists the shape), the
 deferred (split-K partial) rows of the fused norm / RoPE / insert chain, and the launches of the persistent kernel
 (``persistent``), one or two (a row split) per call."""
 

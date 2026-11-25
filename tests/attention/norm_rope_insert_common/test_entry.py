@@ -36,7 +36,7 @@ CASES = [(n, kind) for n in (1, 240) for kind in ("bf16", "fp8")]
 def test_qkv(n, kind):
     require_gfx950()
     _, a = cases.qkv(n, kind=kind)
-    assert E.qkv_norm_rope_insert_unsupported_reason(*a) is None
+    assert E.qkv_norm_rope_insert_blocker(*a) is None
     same_bits(lambda: cases.qkv(n, kind=kind))
 
 
@@ -45,7 +45,7 @@ def test_qkv(n, kind):
 def test_multilayer(n, kind):
     require_gfx950()
     _, a = cases.multilayer(n, kind=kind)
-    assert E.kv_norm_rope_insert_multilayer_unsupported_reason(*a) is None
+    assert E.kv_norm_rope_insert_multilayer_blocker(*a) is None
     same_bits(lambda: cases.multilayer(n, kind=kind))
 
 
@@ -57,10 +57,10 @@ def test_multilayer_reason_in_capture():
     importlib.import_module(cases.PKG + ".kv_norm_rope_insert_multilayer")._tables.clear()  # freed sets' addresses
     call, a = cases.multilayer(40, seed=7)
     with torch.cuda.graph(torch.cuda.CUDAGraph()):
-        why = E.kv_norm_rope_insert_multilayer_unsupported_reason(*a)
+        why = E.kv_norm_rope_insert_multilayer_blocker(*a)
     assert why is not None and "inside CUDA graph capture" in why, why
     call.run(True)
     with torch.cuda.graph(torch.cuda.CUDAGraph()):
-        why = E.kv_norm_rope_insert_multilayer_unsupported_reason(*a)
+        why = E.kv_norm_rope_insert_multilayer_blocker(*a)
         call.run(True)
     assert why is None, why

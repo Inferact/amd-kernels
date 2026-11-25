@@ -6,79 +6,52 @@ The factory builds the shape package's communicator; the caller calls it (``comm
 reason routes by the communicator's type.
 """
 
-import functools
-import importlib
-
 import torch
 import torch.distributed as dist
 
+from amd_kernels import routes
+from amd_kernels.routes import Routes, prepare, renamed
+
 _OP = "topk_gather_merge"
-_SHAPE_HOSTS = {(2048, 8): "amd_kernels.collectives.dcp8_topk_gather_merge_top2048"}
-
-
-@functools.cache
-def _shape_host(key):
-    name = _SHAPE_HOSTS.get(key)
-    return importlib.import_module(name) if name is not None else None
-
-
-@functools.cache
-def available() -> bool:
-    """gfx950 with FlyDSL importable."""
-    if not torch.cuda.is_available() or "gfx950" not in torch.cuda.get_device_properties(0).gcnArchName:
-        return False
-    try:
-        import flydsl  # noqa: F401
-    except ImportError:
-        return False
-    return True
-
-
-def _covered() -> str:
-    return ", ".join(map(str, sorted(_SHAPE_HOSTS)))
+_ROUTES = Routes(f"{_OP}_comm", {(2048, 8): "amd_kernels.collectives.dcp8_topk_gather_merge_top2048"},
+                 ("topk", "world"))
 
 
 def topk_gather_merge_comm(rank, group, device, *, topk):
     """The collective communicator for ``topk`` over ``group`` (every rank calls it); the caller calls ``.warmup()``
     before capture, the communicator per call and ``.close()`` after its graphs are retired."""
-    key = (topk, dist.get_world_size(group))
-    host = _shape_host(key)
-    if host is None:
-        raise ValueError(f"{_OP}_comm: no kernel for topk={key[0]}, world={key[1]} (covered: {_covered()})")
-    return host.TopkGatherMerge(rank, group, device)
+    return _ROUTES.package((topk, dist.get_world_size(group))).TopkGatherMerge(rank, group, device)
 
 
-def topk_gather_merge_comm_unsupported_reason(rank, group, device, *, topk) -> str | None:
+def topk_gather_merge_comm_blocker(rank, group, device, *, topk) -> str | None:
     """None when ``topk_gather_merge_comm`` builds a communicator for these arguments, else why not."""
-    if not available():
+    if not routes.available():
         return f"{_OP}_comm: needs gfx950 with FlyDSL"
     if not dist.is_initialized():
         return f"{_OP}_comm: torch.distributed is not initialized"
-    world = dist.get_world_size(group)
-    if (topk, world) not in _SHAPE_HOSTS:
-        return f"{_OP}_comm: no kernel for topk={topk}, world={world} (covered: {_covered()})"
+    reason = _ROUTES.blocker((topk, dist.get_world_size(group)))
+    if reason is not None:
+        return reason
     if rank != dist.get_rank(group):
         return f"{_OP}_comm: rank {rank} is not this process's rank {dist.get_rank(group)} in the group"
     return None
 
 
+def prepare_topk_gather_merge_comm(rank, group, device, *, topk):
+    """``topk_gather_merge_comm(...)``, or the reason it cannot be built."""
+    return prepare(topk_gather_merge_comm_blocker(rank, group, device, topk=topk),
+                   lambda: topk_gather_merge_comm(rank, group, device, topk=topk))
+
+
 def topk_gather_merge_shapes() -> frozenset:
     """The covered (top-k, world size)."""
-    return frozenset(_SHAPE_HOSTS)
+    return _ROUTES.shapes()
 
 
-@functools.cache
-def _comm_key(cls):
-    for key, name in _SHAPE_HOSTS.items():
-        if cls.__module__ == name or cls.__module__.startswith(name + "."):
-            return key
-    return None
-
-
-def topk_gather_merge_unsupported_reason(comm, scores, local_idx, block_table, out_slots, out_indptr, page_size,
-                                         block_stride_rows) -> str | None:
+def topk_gather_merge_blocker(comm, scores, local_idx, block_table, out_slots, out_indptr, page_size,
+                              block_stride_rows) -> str | None:
     """None when ``comm(scores, local_idx, ...)`` serves this call, else why not (host checks only)."""
-    key = _comm_key(type(comm))
+    key = _ROUTES.owner(type(comm))
     if key is None:
         return f"{_OP}: {type(comm).__name__} is not a communicator of this entry"
     if comm.closed:
@@ -86,7 +59,7 @@ def topk_gather_merge_unsupported_reason(comm, scores, local_idx, block_table, o
     topk = scores.shape[1] if scores.ndim == 2 else None
     if topk != key[0]:
         return f"{_OP}: communicator built for topk={key[0]}, world={key[1]}, call is topk={topk}"
-    rows, max_rows = scores.shape[0], _shape_host(key).host.MAX_ROWS
+    rows, max_rows = scores.shape[0], _ROUTES.host(key).host.MAX_ROWS
     if not 1 <= rows <= max_rows:
         return f"{_OP}: {rows} rows (the kernel takes 1..{max_rows})"
     if scores.dtype != torch.float32 or scores.stride(1) != 1:
@@ -102,3 +75,8 @@ def topk_gather_merge_unsupported_reason(comm, scores, local_idx, block_table, o
     if any(t.device != comm.device for t in (scores, local_idx, block_table, out_slots, out_indptr)):
         return f"{_OP}: operands must be on the communicator's device {comm.device}"
     return None
+
+
+topk_gather_merge_comm_unsupported_reason = renamed(topk_gather_merge_comm_blocker,
+                                                    "topk_gather_merge_comm_unsupported_reason")
+topk_gather_merge_unsupported_reason = renamed(topk_gather_merge_blocker, "topk_gather_merge_unsupported_reason")

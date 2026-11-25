@@ -13,8 +13,8 @@ the shape package that serves it, so the caller imports no shape package:
 
 The single-rank kernels take no world size: 12 local heads already are the TP8 shard. Arguments, dtypes and the
 numerics contract are the routed package's (its `reference.py`); the entry's outputs and in-place states are bit for bit
-those of the direct package call. For a call no package serves, `*_unsupported_reason` (the op's own arguments) returns
-a one-line reason and the caller falls back; it reads only shapes, dtypes, strides and host ints (no device read, safe
+those of the direct package call. For a call no package serves, `*_blocker` (the op's own arguments) returns a
+one-line reason and the caller falls back; it reads only shapes, dtypes, strides and host ints (no device read, safe
 inside CUDA graph capture). The op itself only looks its key up and raises `ValueError` with the same "no kernel for"
 text off the table.
 
@@ -22,16 +22,17 @@ text off the table.
 
 - `kda_common.available`: gfx950 with FlyDSL importable (load-time check).
 - `kda_common.kda_decode_fb_gate_spec`: the KDA core of one layer in a spec-verify step (f_b gate, conv, delta rule,
-  gated norm); `kda_decode_fb_gate_spec_unsupported_reason`, `kda_decode_fb_gate_spec_shapes` (covered keys).
-- `kda_common.kda_prefill`: the chunked prefill of one layer; `kda_prefill_unsupported_reason`, `kda_prefill_shapes`.
+  gated norm); `kda_decode_fb_gate_spec_blocker`, `kda_decode_fb_gate_spec_shapes` (covered keys).
+- `kda_common.kda_prefill`: the chunked prefill of one layer; `kda_prefill_blocker`, `kda_prefill_shapes`.
 - `kda_common.kda_prefill_chunk_table`: the per-step chunk table `kda_prefill` takes, routed by `state_cache`.
 - `kda_common.kda_mono_workspace`: the persistent decode's workspace for a (hidden, heads, head_dim), built before any
-  activation exists (`begin_step()` once a step, `failed()`); `kda_mono_workspace_unsupported_reason`.
+  activation exists (`begin_step()` once a step, `failed()`); `kda_mono_workspace_blocker`;
+  `prepare_kda_mono_workspace` (the workspace or the reason).
 - `kda_common.kda_mono_decode`: one KDA layer from the AttnRes seam to the gated core output on that workspace;
-  `kda_mono_decode_unsupported_reason` (includes "workspace built for <key>, call is <key>"), `kda_mono_decode_shapes`.
+  `kda_mono_decode_blocker` (includes "workspace built for <key>, call is <key>"), `kda_mono_decode_shapes`.
 
-Dispatch: `_SHAPE_HOSTS` in `decode.py`, `prefill.py`, `mono.py` (key -> module name); a shape package is imported on
-the first call of its key; `kda_mono_decode` routes by its workspace's package.
+Dispatch: `_ROUTES` (`amd_kernels.routes.Routes`) in `decode.py`, `prefill.py`, `mono.py`; a shape package is
+imported on the first call of its key; `kda_mono_decode` routes by its workspace's package.
 
 ## Performance
 

@@ -29,7 +29,7 @@ MAX_M = 512
 
 
 def _shapes():
-    hosts = set(G._SHAPE_HOSTS)
+    hosts = set(G._ROUTES.hosts)
     return sorted(set(G.tuned_shapes(BF16)) | hosts)
 
 

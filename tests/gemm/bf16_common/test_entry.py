@@ -7,8 +7,8 @@ import importlib
 import pytest
 import torch
 
-from amd_kernels.gemm.bf16_common import (bf16_latent_down_mxfp4_quant, bf16_latent_down_mxfp4_quant_shapes,
-                                          bf16_latent_down_mxfp4_quant_unsupported_reason,
+from amd_kernels.gemm.bf16_common import (bf16_latent_down_mxfp4_quant, bf16_latent_down_mxfp4_quant_blocker,
+                                          bf16_latent_down_mxfp4_quant_shapes,
                                           bf16_latent_down_mxfp4_quant_weight_reason, latent_down)
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a GPU")
@@ -18,7 +18,7 @@ pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a G
 @pytest.mark.parametrize("with_bf16", [False, True])
 def test_entry_equals_package(key, with_bf16):
     n, k = key
-    name = latent_down._SHAPE_HOSTS[key]
+    name = latent_down._ROUTES.hosts[key]
     host = importlib.import_module(name)
     direct = getattr(host, name.split(".")[-2])
     g = torch.Generator(device="cuda").manual_seed(n + k)
@@ -27,7 +27,7 @@ def test_entry_equals_package(key, with_bf16):
     for m in (1, host.MAX_M, host.MAX_M + 13):
         x = torch.randn(m, k, device="cuda", generator=g).bfloat16()
         ob = [torch.empty(m, n, dtype=torch.bfloat16, device="cuda") if with_bf16 else None for _ in range(2)]
-        assert bf16_latent_down_mxfp4_quant_unsupported_reason(x, w, out_bf16=ob[0]) is None
+        assert bf16_latent_down_mxfp4_quant_blocker(x, w, out_bf16=ob[0]) is None
         ref = direct(x.clone(), w, shuffled=False, out_bf16=ob[1])
         got = bf16_latent_down_mxfp4_quant(x, w, shuffled=False, out_bf16=ob[0])
         torch.cuda.synchronize()

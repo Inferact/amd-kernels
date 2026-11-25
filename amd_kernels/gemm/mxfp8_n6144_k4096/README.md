@@ -4,7 +4,7 @@
 The attention output projection of MiniMax-M3.1-Flash at TP2: K 4096 = 32 heads x 128, N 6144, bf16 out; the target's
 attention layers and the DSpark draft's attention (64 heads / 2 ranks). TP2 has no sequence-parallel `o_proj_full`, so
 this shape serves every prefill chunk too (to 32768 rows). The rows and kernels of this shape, registered with the
-dispatcher in [`../mxfp8_common`](../mxfp8_common/README.md) (`gemm._SHAPE_HOSTS`); layouts and the numerics contract
+dispatcher in [`../mxfp8_common`](../mxfp8_common/README.md) (`gemm._ROUTES`); layouts and the numerics contract
 are that folder's. A producer of o_proj codes writes them in the tile `prequant_code_tile_rows` names (decode rows to
 768, row-major above).
 

@@ -3,7 +3,7 @@
 ## What it does
 The QKV projection of the MiniMax-M3.1-Flash sparse attention layer at TP2: N 4992 = q (32 heads) | k (2) | v (2) |
 index-q (2) | index-k (1, replicated) x 128, K 6144, bf16 out. Every bf16 row of the shape and its persistent kernel,
-registered with the dispatcher in [`../mxfp8_common`](../mxfp8_common/README.md) (`gemm._SHAPE_HOSTS`); layouts and
+registered with the dispatcher in [`../mxfp8_common`](../mxfp8_common/README.md) (`gemm._ROUTES`); layouts and
 the numerics contract are that folder's. Callers: the fused norm + quant producer writes (16, 16) codes in the tile
 `prequant_code_tile_rows` names (decode rows) or row-major codes (persistent rows); the deferred partials feed the
 split-K reduce + norm / RoPE / NVFP4 insert of `attention/norm_rope_nvfp4_insert_d128_rot64_p128` (32 / 2 / 2 heads).

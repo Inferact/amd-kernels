@@ -4,38 +4,24 @@
 (``MlpWorkspace``, ``dense_mlp``, ``pack_gate_up``, ``pack_down``, ``packed_tiles``, ``packed_rows_buffer``,
 ``MAX_ROWS``). The workspace belongs to one key: the reason checks it against the call's weights. The packed weights
 keep the raw weights' shapes, so no check can tell them apart: pass ``dense_mlp_pack_*``'s output."""
-import functools
-import importlib
-
 import torch
 
-from . import available
+from amd_kernels import routes
+from amd_kernels.routes import Routes, prepare, renamed
 
 OP = "bf16_dense_mlp"
 _DIMS = ("hidden", "inter")
-_SHAPE_HOSTS = {
+_ROUTES = Routes(OP, {
     (7168, 1792): "amd_kernels.decoder.bf16_dense_mlp_h7168_i1792.host",
-}
-
-
-@functools.cache
-def _shape_host(key: tuple):
-    name = _SHAPE_HOSTS.get(key)
-    return importlib.import_module(name) if name is not None else None
-
-
-@functools.cache
-def _ws_key(cls: type):
-    return next((key for key in _SHAPE_HOSTS if getattr(_shape_host(key), cls.__name__, None) is cls), None)
+}, _DIMS)
 
 
 def _no_kernel(op: str, key: tuple) -> str:
-    dims = ", ".join(f"{d}={v}" for d, v in zip(_DIMS, key)) if len(key) == len(_DIMS) else f"shape={key}"
-    return f"{op}: no kernel for {dims} (covered: {sorted(_SHAPE_HOSTS)})"
+    return Routes(op, _ROUTES.hosts, _DIMS if len(key) == len(_DIMS) else None).blocker(key)
 
 
 def _host(op: str, key: tuple):
-    host = _shape_host(key)
+    host = _ROUTES.host(key)
     if host is None:
         raise ValueError(_no_kernel(op, key))
     return host
@@ -43,7 +29,7 @@ def _host(op: str, key: tuple):
 
 def bf16_dense_mlp_shapes() -> frozenset[tuple[int, int]]:
     """The covered (hidden, inter) = the down weight's shape."""
-    return frozenset(_SHAPE_HOSTS)
+    return _ROUTES.shapes()
 
 
 def dense_mlp_workspace(device, *, hidden: int, inter: int):
@@ -51,13 +37,20 @@ def dense_mlp_workspace(device, *, hidden: int, inter: int):
     return _host("dense_mlp_workspace", (hidden, inter)).MlpWorkspace(device)
 
 
-def dense_mlp_workspace_unsupported_reason(device, *, hidden: int, inter: int) -> str | None:
+def dense_mlp_workspace_blocker(device, *, hidden: int, inter: int) -> str | None:
+    """None if ``dense_mlp_workspace`` builds a workspace for these arguments, else why not."""
     op = "dense_mlp_workspace"
-    if not available():
+    if not routes.available():
         return f"{op}: needs gfx950 with FlyDSL"
-    if _shape_host((hidden, inter)) is None:
+    if _ROUTES.host((hidden, inter)) is None:
         return _no_kernel(op, (hidden, inter))
     return None
+
+
+def prepare_dense_mlp_workspace(device, *, hidden: int, inter: int):
+    """``dense_mlp_workspace(...)``, or the reason it cannot be built."""
+    return prepare(dense_mlp_workspace_blocker(device, hidden=hidden, inter=inter),
+                   lambda: dense_mlp_workspace(device, hidden=hidden, inter=inter))
 
 
 def dense_mlp_pack_gate_up(w: torch.Tensor) -> torch.Tensor:
@@ -85,24 +78,21 @@ def bf16_dense_mlp(ws, x_packed: torch.Tensor, gate_up: torch.Tensor, down: torc
                    out: torch.Tensor | None = None) -> torch.Tensor:
     """This rank's partial MLP output [rows, hidden] bf16 = down(silu(gate) * up) (the routed package's
     ``dense_mlp``; the caller all-reduces it)."""
-    host = _shape_host(tuple(down.shape))
-    if host is None:
-        raise ValueError(_no_kernel(OP, tuple(down.shape)))
-    return host.dense_mlp(ws, x_packed, gate_up, down, rows, out)
+    return _host(OP, tuple(down.shape)).dense_mlp(ws, x_packed, gate_up, down, rows, out)
 
 
-def bf16_dense_mlp_unsupported_reason(ws, x_packed: torch.Tensor, gate_up: torch.Tensor, down: torch.Tensor,
-                                      rows: int, out: torch.Tensor | None = None) -> str | None:
+def bf16_dense_mlp_blocker(ws, x_packed: torch.Tensor, gate_up: torch.Tensor, down: torch.Tensor, rows: int,
+                           out: torch.Tensor | None = None) -> str | None:
     """None if ``bf16_dense_mlp`` serves this call, else why not (host checks only)."""
-    if not available():
+    if not routes.available():
         return f"{OP}: needs gfx950 with FlyDSL"
     key = tuple(down.shape)
-    host = _shape_host(key)
+    host = _ROUTES.host(key)
     if host is None:
         return _no_kernel(OP, key)
-    ws_key = _ws_key(type(ws))
+    ws_key = _ROUTES.owner(type(ws))
     if ws_key is None:
-        return f"{OP}: no kernel for workspace {type(ws).__qualname__} (covered: {sorted(_SHAPE_HOSTS)})"
+        return f"{OP}: no kernel for workspace {type(ws).__qualname__} (covered: {sorted(_ROUTES.hosts)})"
     if ws_key != key:
         return f"{OP}: workspace built for {ws_key}, call is {key}"
     hidden, inter = key
@@ -125,3 +115,7 @@ def bf16_dense_mlp_unsupported_reason(ws, x_packed: torch.Tensor, gate_up: torch
                             or not out.is_contiguous() or out.device != dev):
         return f"{OP}: out must be contiguous bf16 [{rows}, {hidden}] on down's device"
     return None
+
+
+dense_mlp_workspace_unsupported_reason = renamed(dense_mlp_workspace_blocker, "dense_mlp_workspace_unsupported_reason")
+bf16_dense_mlp_unsupported_reason = renamed(bf16_dense_mlp_blocker, "bf16_dense_mlp_unsupported_reason")

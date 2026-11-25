@@ -14,8 +14,11 @@ vLLM's MXFP8 linears, the norm + quant producers, the QKV chain, SP hand-offs.
 - `gemm.preshuffle_mxfp8_weight`, `gemm.preshuffle_mxfp8_weight_`: the load-time weight preshuffle; the in-place form
   returns False off `tuned_shapes()`.
 - `gemm.tuned_shapes`: the (N, K) with tuned rows (none for fp16 output); switch only these shapes.
-- `gemm.mxfp8_linear_blocker`: None when an M x N x K call (bf16, or row-major codes) has a tuned row that serves it,
-  else the reason; a folder with entries of its own (`linear`, `gemm`, `covers`) answers per row count.
+- `mxfp8_linear_blocker`, `mxfp8_gemm_blocker` (the op's arguments): None when a tuned row serves the call, else the
+  reason; a folder with `covers` answers per row count. `prepare_mxfp8_linear`: a checkpoint-layout weight bound
+  (preshuffled, or AITER's preshuffle as is) and compiled, as a handle. Callers import these from `amd_kernels.gemm`.
+- `gate_up_swiglu.py`, `postmix.py`, `grouped.py`: gate_up + SwiGLU + MXFP8, the mHC post-mix GEMMs, the grouped
+  GEMM (MXFP8 out above 1024 rows on `mxfp8_bmm_mxfp8_out_n1024_k4096`); each `*_blocker`, `*_shapes`, `prepare_*`.
 - `gemm.mxfp8_linear`: the GEMM from a bf16 / fp16 activation, quantized in the selected row's code layout.
 - `gemm.mxfp8_gemm`: the GEMM from row-major activation codes (never a decode row); row-major scales are shuffled
   first (torch).
@@ -31,7 +34,7 @@ vLLM's MXFP8 linears, the norm + quant producers, the QKV chain, SP hand-offs.
   (16, 16) codes.
 
 Dispatch: `gemm._select_config` asks the shape's folder (`gemm/mxfp8_n<N>_k<K>/host.py`: `ROWS`, `select`); a folder's `host.select`
-(`gemm._SHAPE_HOSTS`) answers first; the `decode_splitk` rows run `mxfp8_gemm_decode_splitk.py`. `out=` (a caller's
+(`gemm._ROUTES`) answers first; the `decode_splitk` rows run `mxfp8_gemm_decode_splitk.py`. `out=` (a caller's
 arena) is accepted for o_proj 6144 x 2048 / 4096.
 
 ## Performance

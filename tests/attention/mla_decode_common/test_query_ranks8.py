@@ -32,7 +32,7 @@ def _worker(rank, errors):
     rnd = lambda *s, scale=1.0: (torch.randn(*s, device=dev, generator=g) * scale).bfloat16()  # noqa: E731
     w_qb = [rnd(2304, 1536, scale=0.03) for _ in range(8)]
     w_uk = torch.cat([rnd(12, 128, 512, scale=0.05) for _ in range(8)])
-    why = E.q_gather_comm_unsupported_reason(rank, group, dev, "q", **DIMS)
+    why = E.q_gather_comm_blocker(rank, group, dev, "q", **DIMS)
     if why is not None:
         errors.append(f"rank {rank}: factory reason {why}")
     comm = E.q_gather_comm(rank, group, dev, "q", **DIMS)
@@ -49,7 +49,7 @@ def _worker(rank, errors):
         q_a = rnd(m, 1536)
         for form in ("bf16", "q8", "both"):
             want, have = buffers(m, form), buffers(m, form)
-            why = E.q_bproj_wuk_gather_unsupported_reason(comm, q_a, wq, wu, **have)
+            why = E.q_bproj_wuk_gather_blocker(comm, q_a, wq, wu, **have)
             if why is not None:
                 errors.append(f"rank {rank} m{m} {form}: reason {why}")
             q_b_allgather_wuk_all_heads(comm, q_a, wq, wu, **want)
@@ -59,7 +59,7 @@ def _worker(rank, errors):
                 errors.append(f"rank {rank} m{m} {form}: entry != package")
     lse = torch.zeros((4, 96), dtype=torch.float32, device=dev)
     x = torch.zeros((4, 96, 512), dtype=torch.bfloat16, device=dev)
-    why = E.lse_combine_vup_unsupported_reason(comm, x, lse, x, x)
+    why = E.lse_combine_vup_blocker(comm, x, lse, x, x)
     if not (why or "").startswith("lse_combine_vup: no kernel for communicator QueryGatherComm"):
         errors.append(f"rank {rank}: cross-entry communicator reason {why}")
 

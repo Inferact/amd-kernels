@@ -80,8 +80,8 @@ def single_gpu():
     from tests.moe.mxfp4_h3584_i3072_e896_top16.workload import make_checkpoint
 
     dev = torch.device("cuda")
-    rh = importlib.import_module(router._SHAPE_HOSTS[(896, 7168, 16)])
-    eh = importlib.import_module(experts._SHAPE_HOSTS[(896, 768, 1792)])
+    rh = importlib.import_module(router._ROUTES.hosts[(896, 7168, 16)])
+    eh = importlib.import_module(experts._ROUTES.hosts[(896, 768, 1792)])
     w = (torch.randn(896, 7168, device=dev) * 0.02).to(torch.bfloat16)
     bias = torch.randn(896, device=dev) * 0.1
     ck = eh.MoeWeights.from_checkpoint(*make_checkpoint())
@@ -107,7 +107,7 @@ def eight_ranks():
     torch.cuda.set_device(rank)
     dist.init_process_group("gloo")
     dev, group = torch.device("cuda", rank), dist.group.WORLD
-    lh = importlib.import_module(latent_tail._SHAPE_HOSTS[(896, 3584, 8)])
+    lh = importlib.import_module(latent_tail._ROUTES.hosts[(896, 3584, 8)])
     comm = E.latent_tail_comm(rank, group, dev, up_rows=896, latent=3584)
     for m in (1, 64, 256):
         x = torch.randn(m, 3584, device=dev).to(torch.bfloat16)
@@ -117,7 +117,7 @@ def eight_ranks():
         row("latent tail", m, lambda: lh.allreduce_latent_rmsnorm_up_proj(comm, x, nw, up, shared),
             lambda: E.allreduce_latent_rmsnorm_up_proj(comm, x, nw, up, shared))
     comm.close()
-    kh = importlib.import_module(layer_tail._SHAPE_HOSTS[(7168, 1536, 896, 8)])
+    kh = importlib.import_module(layer_tail._ROUTES.hosts[(7168, 1536, 896, 8)])
     runner = E.layer_tail_runner(dev, group, rank, hidden=7168, o_proj_k=1536, experts=896)
     _, wd = moe_weights(rank, dev)
     for s in (4, 16):

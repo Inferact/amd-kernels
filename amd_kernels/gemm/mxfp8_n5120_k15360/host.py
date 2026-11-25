@@ -82,7 +82,7 @@ def warmup_main_proj(w: MainProjWeights) -> None:
     torch.cuda.synchronize(w.weight.device)
 
 
-# The folder's protocol with ``gemm.mxfp8_common`` (``gemm._SHAPE_HOSTS``): ``mxfp8_linear`` runs ``DISPATCH``'s rows.
+# The folder's protocol with ``gemm.mxfp8_common`` (``gemm._ROUTES``): ``mxfp8_linear`` runs ``DISPATCH``'s rows.
 ROWS = {(N, K, "bf16"): DISPATCH}
 LAUNCHERS = {}
 SERVES_FROM = 640  # rows: below, the rows are correct but not faster than the served path (README)

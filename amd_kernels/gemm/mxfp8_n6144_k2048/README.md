@@ -3,7 +3,7 @@
 ## What it does
 The attention output projection of MiniMax-M3.1-Flash at TP4: K 2048 = 16 heads x 128, N 6144, bf16 out; the target's
 sparse attention layers and the DSpark draft's attention. The rows and kernels of this shape, registered with the
-dispatcher in [`../mxfp8_common`](../mxfp8_common/README.md) (`gemm._SHAPE_HOSTS`); layouts and the numerics contract
+dispatcher in [`../mxfp8_common`](../mxfp8_common/README.md) (`gemm._ROUTES`); layouts and the numerics contract
 are that folder's. The attention kernels' MXFP8 epilogues write the o_proj input in the tile
 `prequant_code_tile_rows` names.
 

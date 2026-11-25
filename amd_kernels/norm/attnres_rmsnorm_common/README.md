@@ -5,18 +5,19 @@ The shape-agnostic entry of the eight-rank all-reduce + AttnRes block mix + RMSN
 never a shape package. `attnres_comm` builds the communicator of the shape package that serves (hidden, world size):
 `hidden` is a keyword (no activation exists yet), the world size comes from the group, and the package is imported on
 that first call. The op is the communicator's method `allreduce_attnres_rmsnorm`, unchanged: numerics, CUDA graph
-behaviour and warm-up are the shape package's. `allreduce_attnres_rmsnorm_unsupported_reason` takes the communicator
-and the method's arguments and returns None or a one-line reason (no kernel for the communicator, a call it was not
+behaviour and warm-up are the shape package's. `allreduce_attnres_rmsnorm_blocker` takes the communicator and the
+method's arguments and returns None or a one-line reason (no kernel for the communicator, a call it was not
 built for, rows out of range, an operand layout the package rejects); it is host-only (no device read, no allocation,
 safe inside graph capture), and the caller falls back on a reason.
 
 ## Entry points
 - `available`: gfx950 with FlyDSL (the routed package's requirement).
-- `attnres_comm`: the communicator of this rank (collective); `attnres_comm_unsupported_reason`: whether a key has one.
-- `allreduce_attnres_rmsnorm_unsupported_reason`: per call, whether `comm.allreduce_attnres_rmsnorm` serves it.
+- `attnres_comm`: the communicator of this rank (collective); `attnres_comm_blocker`: whether a key has one;
+  `prepare_attnres_comm`: the communicator or the reason.
+- `allreduce_attnres_rmsnorm_blocker`: per call, whether `comm.allreduce_attnres_rmsnorm` serves it.
 - `allreduce_attnres_rmsnorm_shapes`: the covered (hidden, world size) keys, for load-time decisions.
 
-Dispatch: `_SHAPE_HOSTS` (key -> shape package module) in `host.py`; a call routes by its communicator.
+Dispatch: `_ROUTES` (`amd_kernels.routes.Routes`) in `host.py`; a call routes by its communicator.
 
 ## Performance
 The entry adds no code to the call (the method is the package's); the caller's per-call check is the reason. MI355X,

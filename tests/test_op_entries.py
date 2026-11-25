@@ -5,6 +5,7 @@ reads from its tensors to the registered shape package, and declines an uncovere
 only (meta tensors, a stand-in package): no GPU."""
 
 import importlib.util
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -23,7 +24,7 @@ from amd_kernels.routes import Routes
 
 ROUTES = {
     f"{mod.__name__}.{name}": routes
-    for mod in (activation, attention, engram, gemm, indexer, moe, norm, sampling)
+    for mod in (sys.modules[m] for m in sorted(sys.modules) if m.startswith("amd_kernels.") and "_common." in m)
     for name, routes in vars(mod).items()
     if isinstance(routes, Routes)
 }
@@ -93,7 +94,7 @@ def test_uncovered_keys_decline_with_a_reason():
         gemm.mxfp8_gate_up_swiglu_mxfp8_blocker(16, 6144, 6144),
         gemm.mxfp8_postmix_blocker(16, 5120, 8192, routed=True),
         gemm.mxfp8_grouped_gemm_blocker(16, 4, 1024, 4096),
-        gemm.bf16_gemm_blocker(meta(100032, 6144)),
+        gemm.bf16_gemm_blocker(meta(100000, 6144)),
         gemm.bf16_gemm_f32_bf16_blocker(meta(4, 7168), meta(1056, 7168), 1024),
         G.mxfp8_linear_blocker(16, 999, 5120),
     ]
@@ -115,7 +116,7 @@ def test_limits_decline(stub):
 def test_entries_route_to_the_shape_package(stub):
     f32, i64 = torch.float32, torch.int64
     q = meta(16, 64, 512, dtype=torch.float8_e4m3fn)
-    attention.sparse_mla_decode(q, meta(8, 64, 512, dtype=torch.float8_e4m3fn), 1, 2, extra=3)
+    attention.sparse_mla_decode(q, meta(8, 64, 512, dtype=torch.float8_e4m3fn), *range(13), extra=3)
     attention.rope_fp8_kv_insert(meta(16, 64, 512), 1, 2, meta(8, 64, 512), 3, 4, meta(32, 64, dtype=f32), 5, 6)
     cs = meta(32, 64, dtype=f32)
     attention.compressor_insert(meta(16, 1024, dtype=f32), 1, 2, 3, 4, 5, 6, 1e-6, meta(8, 64, 512), 7, cs, 8,
@@ -152,14 +153,14 @@ def test_entries_route_to_the_shape_package(stub):
 
 
 def test_uncovered_call_raises_the_reason():
-    with pytest.raises(ValueError, match="no shape package"):
+    with pytest.raises(ValueError, match="no kernel for"):
         norm.rmsnorm_mxfp8(meta(4, 7168), meta(7168), 1e-6)
 
 
 def test_mxfp8_linear_registry_covers_the_new_shapes():
     for shape in ((1792, 5120), (32768, 1280), (4096, 1280), (4608, 5120), (5120, 2304), (5120, 8192),
                   (5120, 15360), (25600, 6144)):  # fmt: skip
-        assert shape in G._SHAPE_HOSTS and shape in G.tuned_shapes(torch.bfloat16), shape
+        assert shape in G._ROUTES.hosts and shape in G.tuned_shapes(torch.bfloat16), shape
     assert G.mxfp8_linear_blocker(16, 1792, 5120) is None
     assert G.mxfp8_linear_blocker(32, 4096, 1280, prequant=True) is None
     assert G.mxfp8_linear_blocker(16, 4096, 1280, prequant=True) is not None

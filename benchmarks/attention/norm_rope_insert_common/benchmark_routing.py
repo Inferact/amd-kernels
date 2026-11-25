@@ -64,7 +64,7 @@ def main():
         entry = replay_us(build()[0], True)
         _, args = build()
         mod = importlib.import_module(f"{cases.PKG}.{fn_name}")
-        entry_op, reason = getattr(E, fn_name), getattr(E, fn_name + "_unsupported_reason")
+        entry_op, reason = getattr(E, fn_name), getattr(E, fn_name + "_blocker")
         real = getattr(mod, fn_name)
         setattr(mod, fn_name, lambda *a, **k: None)
         try:

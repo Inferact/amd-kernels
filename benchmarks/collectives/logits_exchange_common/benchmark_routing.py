@@ -87,8 +87,8 @@ HEADER = ("| rows | graph direct | graph entry | host direct | host entry | disp
 def _rank(rank, port, rows_list, rounds):
     torch.cuda.set_device(rank)
     dist.init_process_group("gloo", init_method=f"tcp://127.0.0.1:{port}", rank=rank, world_size=8)
-    from amd_kernels.collectives.logits_exchange_common import (logits_exchange_comm, logits_gemm_exchange_shapes,
-                                                                logits_gemm_exchange_unsupported_reason)
+    from amd_kernels.collectives.logits_exchange_common import (logits_exchange_comm, logits_gemm_exchange_blocker,
+                                                                logits_gemm_exchange_shapes)
     from amd_kernels.collectives.logits_exchange_common import host as entry
 
     dev = torch.device("cuda", rank)
@@ -96,7 +96,7 @@ def _rank(rank, port, rows_list, rounds):
         n, k, world = key
         if world != 8:
             continue
-        host = importlib.import_module(entry._SHAPE_HOSTS[key])
+        host = importlib.import_module(entry._ROUTES.hosts[key])
         comm = logits_exchange_comm(rank, dist.group.WORLD, dev, n_shard=n, k=k, max_rows=host.RECV_ROWS)
         direct = host.RowAllToAll(rank, dist.group.WORLD, dev, max_rows=host.RECV_ROWS)
         gemm_name, op, serial_above = entry._GEMMS[key]
@@ -118,7 +118,7 @@ def _rank(rank, port, rows_list, rounds):
             idx = torch.arange(rows, device=dev)
             res = timeit([lambda: comm.gemm_exchange(x, w, idx, None, 0),
                           lambda: by_hand(x, idx)], rounds)
-            reason = host_us(lambda: logits_gemm_exchange_unsupported_reason(comm, x, w, idx, None, 0), rounds)
+            reason = host_us(lambda: logits_gemm_exchange_blocker(comm, x, w, idx, None, 0), rounds)
             if rank == 0:
                 _print(rows, res, 0.0, reason)
         comm.close()

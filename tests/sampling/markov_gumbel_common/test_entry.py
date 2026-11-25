@@ -13,11 +13,11 @@ import torch
 from amd_kernels.sampling.markov_gumbel_common import (
     available,
     markov_gumbel_fused,
-    markov_gumbel_fused_unsupported_reason,
+    markov_gumbel_fused_blocker,
     markov_max_rows,
     markov_scratch_dwords,
 )
-from amd_kernels.sampling.markov_gumbel_common.host import _SHAPE_HOSTS
+from amd_kernels.sampling.markov_gumbel_common.host import _ROUTES
 
 from .inputs import RANK, V, clone, make
 
@@ -26,10 +26,10 @@ from .inputs import RANK, V, clone, make
 def test_entry_is_the_package(n, k):
     if not available():
         pytest.skip("requires gfx950 with FlyDSL")
-    pkg = importlib.import_module(_SHAPE_HOSTS[(V, RANK)])
+    pkg = importlib.import_module(_ROUTES.hosts[(V, RANK)])
     d = make(n, k, 10 + n + k)
     assert markov_max_rows(d["w1"]) == 48 and markov_scratch_dwords(d["w1"], n) <= d["scratch"].numel()
-    assert markov_gumbel_fused_unsupported_reason(**d) is None
+    assert markov_gumbel_fused_blocker(**d) is None
     a, b = clone(d), clone(d)
     markov_gumbel_fused(**a)
     pkg.markov_gumbel_fused(**b)
@@ -53,5 +53,5 @@ def test_off_device_reason(name):
         pytest.skip("requires gfx950 with FlyDSL")
     d = make(4, 3, 5)
     d[name] = d[name].cpu()
-    why = markov_gumbel_fused_unsupported_reason(**d)
+    why = markov_gumbel_fused_blocker(**d)
     assert why == f"markov_gumbel_fused: {name} on cpu (the current CUDA device)"

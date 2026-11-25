@@ -1,39 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the amd-kernels project
 """Shape-agnostic top-p mask: reads the vocabulary from ``logits`` and calls that vocabulary's package
-(``_SHAPE_HOSTS``, imported on its first call)."""
-
-import functools
-import importlib
+(``_ROUTES``, imported on its first call)."""
 
 import torch
 
-_SHAPE_HOSTS = {
+from amd_kernels import routes
+from amd_kernels.routes import Routes, available, renamed
+
+_ROUTES = Routes("top_p_mask", {
     (163840,): "amd_kernels.sampling.top_p_mask_f32_v163840",
     (200064,): "amd_kernels.sampling.top_p_mask_f32_v200064",
-}
-
-
-@functools.cache
-def available() -> bool:
-    """gfx950 with FlyDSL importable."""
-    if not torch.cuda.is_available() or "gfx950" not in torch.cuda.get_device_properties(0).gcnArchName:
-        return False
-    try:
-        import flydsl  # noqa: F401
-    except ImportError:
-        return False
-    return True
-
-
-@functools.cache
-def _shape_host(vocab: int):
-    name = _SHAPE_HOSTS.get((vocab,))
-    return importlib.import_module(name) if name is not None else None
-
-
-def _no_kernel(vocab: int) -> str:
-    return f"top_p_mask: no kernel for vocab={vocab} (covered: {sorted(_SHAPE_HOSTS)})"
+}, ("vocab",))
 
 
 def _off_device(**tensors: torch.Tensor) -> str | None:
@@ -47,29 +25,43 @@ def _off_device(**tensors: torch.Tensor) -> str | None:
 
 def top_p_mask_shapes() -> frozenset[tuple[int]]:
     """The (vocab,) keys with a package."""
-    return frozenset(_SHAPE_HOSTS)
+    return _ROUTES.shapes()
 
 
 def top_p_mask(logits: torch.Tensor, p: torch.Tensor, buffer: torch.Tensor | None = None) -> torch.Tensor:
     """Masks fp32 ``logits`` [n, V] in place with -inf outside each row's top-p set (the package's contract);
     returns ``logits``. ``buffer``: the > 64-row workspace of a package that takes one."""
-    host = _shape_host(logits.shape[-1])
-    if host is None:
-        raise ValueError(_no_kernel(logits.shape[-1]))
+    host = _ROUTES.package((logits.shape[-1],))
     if buffer is None:
         return host.top_p_mask(logits, p)
     return host.top_p_mask(logits, p, buffer)
 
 
-def top_p_mask_unsupported_reason(logits: torch.Tensor, p: torch.Tensor,
-                                  buffer: torch.Tensor | None = None) -> str | None:
+def top_p_mask_config_blocker(vocab: int, mask_value: float = float("-inf")) -> str | None:
+    """None when a package masks rows of ``vocab`` logits with ``mask_value``: a load-time check (no logits yet)."""
+    if not routes.available():
+        return "top_p_mask: needs gfx950 with FlyDSL"
+    reason = _ROUTES.blocker((vocab,))
+    if reason is not None:
+        return reason
+    reason = _ROUTES.package((vocab,)).top_p_blocker(vocab, mask_value)
+    return None if reason is None else f"top_p_mask: {reason}"
+
+
+def warmup_top_p_mask(vocab: int, device=None) -> None:
+    """Compile every row-count variant of ``vocab``'s package (before graph capture)."""
+    _ROUTES.package((vocab,)).warmup_top_p_mask(device)
+
+
+def top_p_mask_blocker(logits: torch.Tensor, p: torch.Tensor, buffer: torch.Tensor | None = None) -> str | None:
     """None when ``top_p_mask`` serves this call, else why not (host checks only)."""
-    if not available():
+    if not routes.available():
         return "top_p_mask: needs gfx950 with FlyDSL"
     vocab = logits.shape[-1] if logits.dim() else 0
-    host = _shape_host(vocab)
-    if host is None:
-        return _no_kernel(vocab)
+    reason = _ROUTES.blocker((vocab,))
+    if reason is not None:
+        return reason
+    host = _ROUTES.package((vocab,))
     blocker = host.top_p_blocker(vocab, float("-inf"))
     if blocker is not None:
         return f"top_p_mask: {blocker}"
@@ -97,3 +89,6 @@ def top_p_mask_unsupported_reason(logits: torch.Tensor, p: torch.Tensor,
                     "contiguous)")
         return _off_device(buffer=buffer)
     return None
+
+
+top_p_mask_unsupported_reason = renamed(top_p_mask_blocker, "top_p_mask_unsupported_reason")

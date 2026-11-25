@@ -15,13 +15,14 @@ caller imports no shape package. Computation, dtypes and numerics are the routed
 - `available`: gfx950 with FlyDSL, the load-time check before any shape question.
 - `topk_gather_merge_comm`: the collective factory (every rank calls it); the communicator is called per step,
   `.warmup()` before capture and `.close()` after its graphs are retired.
-- `topk_gather_merge_comm_unsupported_reason`: the factory's arguments -> None or a one-line reason.
+- `topk_gather_merge_comm_blocker`: the factory's arguments -> None or a one-line reason.
+- `prepare_topk_gather_merge_comm`: the communicator, or the reason it cannot be built.
 - `topk_gather_merge_shapes`: the covered (top-k, world size), for a caller that decides at load.
-- `topk_gather_merge_unsupported_reason`: the communicator and its call's arguments -> None or a one-line reason
+- `topk_gather_merge_blocker`: the communicator and its call's arguments -> None or a one-line reason
   (host checks only, safe inside graph capture); it routes by the communicator's type and compares the call's top-k
   with the one it was built for.
 
-Dispatch: `host._SHAPE_HOSTS` (module names, imported on first use).
+Dispatch: `host._ROUTES` (module names, imported on first use).
 
 ## Performance
 The entry adds nothing to a call: the caller calls the package's communicator. Eight MI355X, graph replay of 100

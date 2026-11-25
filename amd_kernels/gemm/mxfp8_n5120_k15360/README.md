@@ -22,7 +22,7 @@ of its staged, AITER, decode and 4-wave rows at 32-8192 rows).
 ## Entry points
 
 - Callers use the common entries: `gemm.mxfp8_common.gemm.mxfp8_linear` / `mxfp8_gemm` with `mxfp8_linear_blocker`;
-  this folder is registered in `gemm._SHAPE_HOSTS` (`ROWS` = `DISPATCH`, `covers`).
+  this folder is registered in `gemm._ROUTES` (`ROWS` = `DISPATCH`, `covers`).
 - `MainProjWeights.from_block_scales`: the checkpoint's weight and block scales in the GEMM's layout; once, before graph
   capture.
 - `main_proj`: the projection of a bf16 activation; graph-capture safe. An `amd_kernels.warm_up` entry: the first call

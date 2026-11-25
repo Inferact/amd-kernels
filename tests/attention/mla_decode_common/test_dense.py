@@ -33,7 +33,7 @@ def case(qlen, reqs, given):
 def test_equals_the_package(qlen, reqs, given):
     require_gfx950()
     args, kw = case(qlen, reqs, given)
-    assert E.fp8_dense_mla_decode_unsupported_reason(*args, **kw) is None
+    assert E.fp8_dense_mla_decode_blocker(*args, **kw) is None
     want_a, want_kw = clone(args), clone(kw)
     want = direct(*want_a, **want_kw)
     got = E.fp8_dense_mla_decode(*args, **kw)
@@ -47,9 +47,9 @@ def test_layout_reasons():
     args, _ = case(4, 2, False)
     a = list(args)
     a[0] = a[0].to(torch.bfloat16)
-    assert "operand layout (supports_fp8_dense_mla_decode)" in E.fp8_dense_mla_decode_unsupported_reason(*a)
+    assert "operand layout (supports_fp8_dense_mla_decode)" in E.fp8_dense_mla_decode_blocker(*a)
     a = list(args)
     a[5] = a[5].cpu()
-    assert "operand layout (supports_fp8_dense_mla_decode)" in E.fp8_dense_mla_decode_unsupported_reason(*a)
+    assert "operand layout (supports_fp8_dense_mla_decode)" in E.fp8_dense_mla_decode_blocker(*a)
     lse = torch.zeros((8, 96), dtype=torch.bfloat16, device="cuda")
-    assert "operand layout (lse fp32" in E.fp8_dense_mla_decode_unsupported_reason(*args, lse=lse)
+    assert "operand layout (lse fp32" in E.fp8_dense_mla_decode_blocker(*args, lse=lse)

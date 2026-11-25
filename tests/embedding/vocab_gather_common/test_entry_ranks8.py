@@ -17,11 +17,11 @@ from tests.multi_gpu8 import run_on_8_gpus
 def worker(rank, errors):
     from amd_kernels import compile_watch
     from amd_kernels.embedding.vocab_gather_common import (
+        vocab_gather_blocker,
         vocab_gather_comm,
-        vocab_gather_comm_unsupported_reason,
-        vocab_gather_unsupported_reason,
+        vocab_gather_comm_blocker,
     )
-    from amd_kernels.embedding.vocab_gather_common.host import _SHAPE_HOSTS
+    from amd_kernels.embedding.vocab_gather_common.host import _ROUTES
 
     dev = torch.device("cuda", rank)
     pairs = [dist.new_group([2 * i, 2 * i + 1]) for i in range(4)]
@@ -34,17 +34,17 @@ def worker(rank, errors):
         tag = (hidden, size, rank)
         gen = torch.Generator().manual_seed(1000 * size + rank)
         weight = torch.randn(128, hidden, generator=gen).bfloat16().to(dev)
-        why = vocab_gather_comm_unsupported_reason(weight, grank, group)
+        why = vocab_gather_comm_blocker(weight, grank, group)
         if why is not None:
             errors.append(f"{tag}: {why}")
             continue
-        wrong = vocab_gather_comm_unsupported_reason(weight, (grank + 1) % size, group)
+        wrong = vocab_gather_comm_blocker(weight, (grank + 1) % size, group)
         if wrong is None or "this process is rank" not in wrong:
             errors.append(f"{tag}: wrong rank: {wrong}")
-        if size == 8 and "no kernel" not in (vocab_gather_comm_unsupported_reason(weight[:, :6144].contiguous(), grank,
-                                                                                    group) or ""):
+        if size == 8 and "no kernel" not in (vocab_gather_comm_blocker(weight[:, :6144].contiguous(), grank, group)
+                                             or ""):
             errors.append(f"{tag}: hidden 6144 on 8 ranks has a kernel")
-        pkg = importlib.import_module(_SHAPE_HOSTS[(hidden, size)])
+        pkg = importlib.import_module(_ROUTES.hosts[(hidden, size)])
         entry = vocab_gather_comm(weight, grank, group)
         direct = pkg.VocabGather(weight, grank, group)
         if type(entry) is not pkg.VocabGather:
@@ -57,8 +57,8 @@ def worker(rank, errors):
         for m in (1, 80, 2048):
             for dtype in (torch.int32, torch.int64):
                 ids = torch.randint(-1, size * 128 + 1, (m,), generator=ids_gen, dtype=dtype).to(dev)
-                if vocab_gather_unsupported_reason(entry, ids) is not None:
-                    errors.append(f"{tag}: call reason {vocab_gather_unsupported_reason(entry, ids)}")
+                if vocab_gather_blocker(entry, ids) is not None:
+                    errors.append(f"{tag}: call reason {vocab_gather_blocker(entry, ids)}")
                 a, b = entry(ids), direct(ids)
                 torch.cuda.synchronize()
                 if not torch.equal(a.view(torch.int16), b.view(torch.int16)):

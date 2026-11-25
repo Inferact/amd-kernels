@@ -28,8 +28,8 @@ def body(rank, errors):
     warm_up.set_auto(True)
     dev = torch.device("cuda", rank)
     group = dist.group.WORLD
-    host = importlib.import_module(latent_tail._SHAPE_HOSTS[KEY])
-    if E.latent_tail_comm_unsupported_reason(rank, group, dev, up_rows=896, latent=3584) is not None:
+    host = importlib.import_module(latent_tail._ROUTES.hosts[KEY])
+    if E.latent_tail_comm_blocker(rank, group, dev, up_rows=896, latent=3584) is not None:
         errors.append(f"rank {rank}: factory reason")
     comm = E.latent_tail_comm(rank, group, dev, up_rows=896, latent=3584)
     if type(comm) is not host.LatentTailComm:
@@ -45,7 +45,7 @@ def body(rank, errors):
     for m in (1, 256):
         parts, nw, w, shared0 = make(m, 50 + m, dev, rank)
         a, b = shared0.clone(), shared0.clone()
-        if E.allreduce_latent_rmsnorm_up_proj_unsupported_reason(comm, parts[rank], nw, w, a) is not None:
+        if E.allreduce_latent_rmsnorm_up_proj_blocker(comm, parts[rank], nw, w, a) is not None:
             errors.append(f"rank {rank}: reason on served rows {m}")
         host.allreduce_latent_rmsnorm_up_proj(comm, parts[rank], nw, w, a)
         E.allreduce_latent_rmsnorm_up_proj(comm, parts[rank], nw, w, b)
@@ -56,7 +56,7 @@ def body(rank, errors):
         _, nw, w, shared0 = make(m, 70 + m, dev, rank)
         slots, rev = slots_of(m, 90 + m)
         a, b = shared0.clone(), shared0.clone()
-        if E.allreduce_slots_rmsnorm_up_proj_unsupported_reason(comm, slots, rev, nw, w, a) is not None:
+        if E.allreduce_slots_rmsnorm_up_proj_blocker(comm, slots, rev, nw, w, a) is not None:
             errors.append(f"rank {rank}: slots reason on served rows {m}")
         host.allreduce_slots_rmsnorm_up_proj(comm, slots, rev, nw, w, a)
         E.allreduce_slots_rmsnorm_up_proj(comm, slots, rev, nw, w, b)
@@ -66,7 +66,7 @@ def body(rank, errors):
 
     parts, nw, w, shared0 = make(12, 7, dev, rank)
     wide = torch.zeros(1024, 3584, dtype=torch.bfloat16, device=dev)
-    reason = E.allreduce_latent_rmsnorm_up_proj_unsupported_reason(comm, parts[rank], nw, wide, shared0)
+    reason = E.allreduce_latent_rmsnorm_up_proj_blocker(comm, parts[rank], nw, wide, shared0)
     if "communicator built for up_rows=896, latent=3584, world=8, call is up_rows=1024" not in (reason or ""):
         errors.append(f"rank {rank}: mismatch reason {reason!r}")
 

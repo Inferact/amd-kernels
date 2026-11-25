@@ -86,15 +86,15 @@ def main():
     p.add_argument("--rows", type=int, nargs="+", default=[16, 60, 144])
     p.add_argument("--rounds", type=int, default=15)
     a = p.parse_args()
-    from amd_kernels.decoder.bf16_dense_mlp_common import (bf16_dense_mlp, bf16_dense_mlp_shapes,
-                                                           bf16_dense_mlp_unsupported_reason, dense_mlp_pack_down,
+    from amd_kernels.decoder.bf16_dense_mlp_common import (bf16_dense_mlp, bf16_dense_mlp_blocker,
+                                                           bf16_dense_mlp_shapes, dense_mlp_pack_down,
                                                            dense_mlp_pack_gate_up, dense_mlp_rows_buffer,
                                                            dense_mlp_workspace, host as entry)
 
     dev = torch.device("cuda")
     for key in sorted(bf16_dense_mlp_shapes()):
         hidden, inter = key
-        host = importlib.import_module(entry._SHAPE_HOSTS[key])
+        host = importlib.import_module(entry._ROUTES.hosts[key])
         ws = dense_mlp_workspace(dev, hidden=hidden, inter=inter)
         gu = dense_mlp_pack_gate_up((torch.randn(2 * inter, hidden, device=dev) * 0.02).bfloat16())
         dn = dense_mlp_pack_down((torch.randn(hidden, inter, device=dev) * 0.03).bfloat16())
@@ -104,8 +104,8 @@ def main():
             out = torch.empty(rows, hidden, dtype=torch.bfloat16, device=dev)
             _print(rows, timeit([lambda: bf16_dense_mlp(ws, xp, gu, dn, rows, out),
                                  lambda: host.dense_mlp(ws, xp, gu, dn, rows, out)], a.rounds),
-                   host_us(lambda: entry._shape_host(tuple(dn.shape)), a.rounds),
-                   host_us(lambda: bf16_dense_mlp_unsupported_reason(ws, xp, gu, dn, rows, out), a.rounds))
+                   host_us(lambda: entry._ROUTES.host(tuple(dn.shape)), a.rounds),
+                   host_us(lambda: bf16_dense_mlp_blocker(ws, xp, gu, dn, rows, out), a.rounds))
 
 
 if __name__ == "__main__":

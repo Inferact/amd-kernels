@@ -1,73 +1,56 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the amd-kernels project
 """The context rows' K norm + RoPE + K / V inserts into every layer's cache: routes a call by (head_dim, rotary_dim)
-of its K norm weights and cos / sin cache to the shape package (``_SHAPE_HOSTS``, imported on the first call of its
+of its K norm weights and cos / sin cache to the shape package (``_ROUTES``, imported on the first call of its
 key)."""
-
-import functools
-import importlib
 
 import torch
 
-from . import device as _dev
+from amd_kernels import routes
+from amd_kernels.routes import Routes, renamed
 
-_SHAPE_HOSTS = {(64, 64): "amd_kernels.attention.norm_rope_insert_d64_rot64"}
-_OP = "kv_norm_rope_insert_multilayer"
-
-
-@functools.cache
-def _shape_host(key):
-    name = _SHAPE_HOSTS.get(key)
-    return importlib.import_module(name) if name is not None else None
+_ROUTES = Routes("kv_norm_rope_insert_multilayer", {(64, 64): "amd_kernels.attention.norm_rope_insert_d64_rot64"},
+                 ("head_dim", "rotary_dim"))
+_OP = _ROUTES.op
 
 
-@functools.cache
 def _op_module(key):
-    return importlib.import_module(_SHAPE_HOSTS[key] + ".kv_norm_rope_insert_multilayer")
+    return _ROUTES.module(key, "kv_norm_rope_insert_multilayer")
 
 
 def _key(k_norm_weight, cos_sin_cache):
     return (k_norm_weight.shape[-1], cos_sin_cache.shape[-1])
 
 
-def _no_kernel(key):
-    return f"{_OP}: no kernel for head_dim={key[0]}, rotary_dim={key[1]} (covered: {sorted(_SHAPE_HOSTS)})"
-
-
 def kv_norm_rope_insert_multilayer_shapes() -> frozenset[tuple[int, int]]:
     """The (head_dim, rotary_dim) with a kernel."""
-    return frozenset(_SHAPE_HOSTS)
+    return _ROUTES.shapes()
 
 
 def kv_norm_rope_insert_multilayer_kernel(kv, positions, k_norm_weight, cos_sin_cache, kv_caches, slot_mappings,
                                           k_scales, v_scales, eps, n_insert=None):
     """The routed ``amd_kernels.warm_up`` entry (to compile without launching)."""
-    key = _key(k_norm_weight, cos_sin_cache)
-    if _shape_host(key) is None:
-        raise ValueError(_no_kernel(key))
-    return _op_module(key).kv_norm_rope_insert_multilayer
+    return _op_module(_key(k_norm_weight, cos_sin_cache)).kv_norm_rope_insert_multilayer
 
 
 def kv_norm_rope_insert_multilayer(kv, positions, k_norm_weight, cos_sin_cache, kv_caches, slot_mappings, k_scales,
                                    v_scales, eps, n_insert=None):
     """K norm + RoPE and the K / V inserts of the context rows' fused K / V row into every layer's cache (the routed
     package's ``kv_norm_rope_insert_multilayer``)."""
-    key = _key(k_norm_weight, cos_sin_cache)
-    if _shape_host(key) is None:
-        raise ValueError(_no_kernel(key))
-    _op_module(key).kv_norm_rope_insert_multilayer(kv, positions, k_norm_weight, cos_sin_cache, kv_caches,
-                                                   slot_mappings, k_scales, v_scales, eps, n_insert=n_insert)
+    _op_module(_key(k_norm_weight, cos_sin_cache)).kv_norm_rope_insert_multilayer(
+        kv, positions, k_norm_weight, cos_sin_cache, kv_caches, slot_mappings, k_scales, v_scales, eps,
+        n_insert=n_insert)
 
 
-def kv_norm_rope_insert_multilayer_unsupported_reason(kv, positions, k_norm_weight, cos_sin_cache, kv_caches,
-                                                      slot_mappings, k_scales, v_scales, eps,
-                                                      n_insert=None) -> str | None:
+def kv_norm_rope_insert_multilayer_blocker(kv, positions, k_norm_weight, cos_sin_cache, kv_caches, slot_mappings,
+                                           k_scales, v_scales, eps, n_insert=None) -> str | None:
     """None when ``kv_norm_rope_insert_multilayer`` serves this call, else why not (host checks only)."""
-    if not _dev.available():
+    if not routes.available():
         return f"{_OP}: needs gfx950 with FlyDSL"
     key = _key(k_norm_weight, cos_sin_cache)
-    if _shape_host(key) is None:
-        return _no_kernel(key)
+    reason = _ROUTES.blocker(key)
+    if reason is not None:
+        return reason
     d = key[0]
     if not _op_module(key).supports_multilayer(kv_caches, k_scales, v_scales):
         c = kv_caches[0] if kv_caches else None
@@ -97,3 +80,7 @@ def kv_norm_rope_insert_multilayer_unsupported_reason(kv, positions, k_norm_weig
         return f"{_OP}: slot mappings of {sorted({s.shape[0] for s in slot_mappings})} rows (every layer the same)"
     blocker = _op_module(key).capture_blocker(kv, kv_caches, k_scales, v_scales)
     return None if blocker is None else f"{_OP}: {blocker}"
+
+
+kv_norm_rope_insert_multilayer_unsupported_reason = renamed(kv_norm_rope_insert_multilayer_blocker,
+                                                            "kv_norm_rope_insert_multilayer_unsupported_reason")

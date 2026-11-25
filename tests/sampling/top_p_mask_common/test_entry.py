@@ -9,8 +9,8 @@ import importlib
 import pytest
 import torch
 
-from amd_kernels.sampling.top_p_mask_common import available, top_p_mask, top_p_mask_unsupported_reason
-from amd_kernels.sampling.top_p_mask_common.host import _SHAPE_HOSTS
+from amd_kernels.sampling.top_p_mask_common import available, top_p_mask, top_p_mask_blocker
+from amd_kernels.sampling.top_p_mask_common.host import _ROUTES
 
 
 def require_gfx950():
@@ -37,10 +37,10 @@ def same(a, b):
                                                  (200064, 256, True)])
 def test_entry_is_the_package(vocab, n, with_buffer):
     require_gfx950()
-    pkg = importlib.import_module(_SHAPE_HOSTS[(vocab,)])
+    pkg = importlib.import_module(_ROUTES.hosts[(vocab,)])
     x, p = lm_rows(n, vocab, n + vocab)
     buf = [torch.zeros(pkg.rows_grid(n, 0), vocab, device="cuda") for _ in range(2)] if with_buffer else [None, None]
-    assert top_p_mask_unsupported_reason(x, p, buf[0]) is None
+    assert top_p_mask_blocker(x, p, buf[0]) is None
     a, b = x.clone(), x.clone()
     assert top_p_mask(a, p, buf[0]) is a
     if with_buffer:
@@ -56,16 +56,16 @@ def test_entry_is_the_package(vocab, n, with_buffer):
 def test_small_buffer_reason():
     require_gfx950()
     x, p = lm_rows(100, 200064, 3)
-    grid = importlib.import_module(_SHAPE_HOSTS[(200064,)]).rows_grid(100, 0)
-    why = top_p_mask_unsupported_reason(x, p, torch.empty(grid - 1, 200064, device="cuda"))
+    grid = importlib.import_module(_ROUTES.hosts[(200064,)]).rows_grid(100, 0)
+    why = top_p_mask_blocker(x, p, torch.empty(grid - 1, 200064, device="cuda"))
     assert why == f"top_p_mask: buffer torch.float32 ({grid - 1}, 200064) (fp32 [>= {grid}, 200064], contiguous)"
 
 
 def test_off_device_reasons():
     require_gfx950()
     x, p = lm_rows(100, 200064, 4)
-    assert top_p_mask_unsupported_reason(x, p.cpu()) == "top_p_mask: p on cpu (the current CUDA device)"
-    assert top_p_mask_unsupported_reason(x.cpu(), p) == "top_p_mask: logits on cpu (the current CUDA device)"
+    assert top_p_mask_blocker(x, p.cpu()) == "top_p_mask: p on cpu (the current CUDA device)"
+    assert top_p_mask_blocker(x.cpu(), p) == "top_p_mask: logits on cpu (the current CUDA device)"
     buf = torch.empty(256, 200064)
-    assert top_p_mask_unsupported_reason(x, p, buf) == "top_p_mask: buffer on cpu (the current CUDA device)"
-    assert top_p_mask_unsupported_reason(x[:8], p[:8], buf) is None
+    assert top_p_mask_blocker(x, p, buf) == "top_p_mask: buffer on cpu (the current CUDA device)"
+    assert top_p_mask_blocker(x[:8], p[:8], buf) is None

@@ -5,35 +5,23 @@ package's host (``RowAllToAll``, ``BUFFERS``, ``RECV_ROWS``) and the GEMM packag
 composes the two in ``LogitsExchange``, the communicator the factory returns (each package imports only itself). The
 ops are its methods (``gemm_exchange``, ``recv``, ``warmup``, ``close``); the reason of a ``gemm_exchange`` call routes
 by the communicator's key."""
-import functools
-import importlib
-
 import torch
 import torch.distributed as dist
 
-from . import available
+from amd_kernels import routes
+from amd_kernels.routes import Routes, prepare, renamed
 
 OP = "logits_gemm_exchange"
 _DIMS = ("n_shard", "k", "world")
-_SHAPE_HOSTS = {
+_ROUTES = Routes("logits_exchange_comm", {
     (20480, 7168, 8): "amd_kernels.collectives.all_to_all_bf16_n20480_ranks8.host",
-}
+}, _DIMS)
 # (GEMM host, op, rows up to which the GEMM pushes its rows itself in owner / all-gather mode): the crossovers measured
 # in the exchange package's README (above them a local write and one contiguous push)
 _GEMMS = {
     (20480, 7168, 8): ("amd_kernels.gemm.bf16_n20480_k7168.host", "bf16_gemm_n20480_k7168", {True: 96, False: 16}),
 }
-
-
-@functools.cache
-def _shape_host(key: tuple):
-    name = _SHAPE_HOSTS.get(key)
-    return importlib.import_module(name) if name is not None else None
-
-
-@functools.cache
-def _gemm_host(key: tuple):
-    return importlib.import_module(_GEMMS[key][0])
+_GEMM_ROUTES = Routes(OP, {key: gemm[0] for key, gemm in _GEMMS.items()}, _DIMS)
 
 
 class LogitsExchange:
@@ -85,14 +73,9 @@ class LogitsExchange:
         self.exchange.close()
 
 
-def _no_kernel(op: str, key: tuple) -> str:
-    dims = ", ".join(f"{d}={v}" for d, v in zip(_DIMS, key))
-    return f"{op}: no kernel for {dims} (covered: {sorted(_SHAPE_HOSTS)})"
-
-
 def logits_gemm_exchange_shapes() -> frozenset[tuple[int, int, int]]:
     """The covered (vocab shard N, K, world) of the lm_head shard [N, K]."""
-    return frozenset(_SHAPE_HOSTS)
+    return _ROUTES.shapes()
 
 
 def logits_exchange_comm(rank: int, group, device, *, n_shard: int, k: int, max_rows: int, buffers: int = 2):
@@ -100,23 +83,22 @@ def logits_exchange_comm(rank: int, group, device, *, n_shard: int, k: int, max_
     no call allocates (graph capture). ``buffers=1``: buffer 1 is buffer 0, for a caller whose ranks all read an
     exchange's rows before any of them issues the next."""
     key = (n_shard, k, dist.get_world_size(group))
-    host = _shape_host(key)
-    if host is None:
-        raise ValueError(_no_kernel("logits_exchange_comm", key))
-    exchange = host.RowAllToAll(rank, group, device, max_rows=max_rows, buffers=buffers)
+    exchange = _ROUTES.package(key).RowAllToAll(rank, group, device, max_rows=max_rows, buffers=buffers)
     _, op, serial_above = _GEMMS[key]
-    return LogitsExchange(key, exchange, _gemm_host(key), op, serial_above)
+    return LogitsExchange(key, exchange, _GEMM_ROUTES.host(key), op, serial_above)
 
 
-def logits_exchange_comm_unsupported_reason(rank: int, group, device, *, n_shard: int, k: int, max_rows: int,
-                                            buffers: int = 2) -> str | None:
-    op = "logits_exchange_comm"
-    if not available():
+def logits_exchange_comm_blocker(rank: int, group, device, *, n_shard: int, k: int, max_rows: int,
+                                 buffers: int = 2) -> str | None:
+    """None if ``logits_exchange_comm`` with these arguments builds a communicator, else why not."""
+    op = _ROUTES.op
+    if not routes.available():
         return f"{op}: needs gfx950 with FlyDSL"
     key = (n_shard, k, dist.get_world_size(group))
-    host = _shape_host(key)
-    if host is None:
-        return _no_kernel(op, key)
+    reason = _ROUTES.blocker(key)
+    if reason is not None:
+        return reason
+    host = _ROUTES.host(key)
     if not 1 <= max_rows <= host.RECV_ROWS:
         return f"{op}: max_rows {max_rows} (the kernel takes 1..{host.RECV_ROWS})"
     if not 1 <= buffers <= host.BUFFERS:
@@ -126,15 +108,23 @@ def logits_exchange_comm_unsupported_reason(rank: int, group, device, *, n_shard
     return None
 
 
-def logits_gemm_exchange_unsupported_reason(comm, x: torch.Tensor, w: torch.Tensor, row_indices: torch.Tensor,
-                                            counts: torch.Tensor | None = None, buf: int = 0,
-                                            serial_above: int | None = None) -> str | None:
+def prepare_logits_exchange_comm(rank: int, group, device, *, n_shard: int, k: int, max_rows: int, buffers: int = 2):
+    """``logits_exchange_comm(...)``, or the reason it cannot be built."""
+    return prepare(logits_exchange_comm_blocker(rank, group, device, n_shard=n_shard, k=k, max_rows=max_rows,
+                                                buffers=buffers),
+                   lambda: logits_exchange_comm(rank, group, device, n_shard=n_shard, k=k, max_rows=max_rows,
+                                                buffers=buffers))
+
+
+def logits_gemm_exchange_blocker(comm, x: torch.Tensor, w: torch.Tensor, row_indices: torch.Tensor,
+                                 counts: torch.Tensor | None = None, buf: int = 0,
+                                 serial_above: int | None = None) -> str | None:
     """None if ``comm.gemm_exchange`` with these arguments is served, else why not (host checks only)."""
-    if not available():
+    if not routes.available():
         return f"{OP}: needs gfx950 with FlyDSL"
     key = comm.key if isinstance(comm, LogitsExchange) else None
-    if key not in _SHAPE_HOSTS:
-        return f"{OP}: no kernel for communicator {type(comm).__qualname__} (covered: {sorted(_SHAPE_HOSTS)})"
+    if key not in _ROUTES.hosts:
+        return f"{OP}: no kernel for communicator {type(comm).__qualname__} (covered: {sorted(_ROUTES.hosts)})"
     n_shard, k, world = key
     if tuple(w.shape) != (n_shard, k):
         return f"{OP}: communicator built for {key}, call is {(*w.shape, world)}"
@@ -155,6 +145,13 @@ def logits_gemm_exchange_unsupported_reason(comm, x: torch.Tensor, w: torch.Tens
     if counts is not None and (tuple(counts.shape) != (world,) or counts.dtype != torch.int32
                                or not counts.is_contiguous() or counts.device != dev):
         return f"{OP}: counts must be contiguous int32 [{world}] on the communicator's device"
-    if not 0 <= buf < _shape_host(key).BUFFERS:
-        return f"{OP}: buffer {buf} (the communicator has {_shape_host(key).BUFFERS})"
+    buffers = _ROUTES.host(key).BUFFERS
+    if not 0 <= buf < buffers:
+        return f"{OP}: buffer {buf} (the communicator has {buffers})"
     return None
+
+
+logits_exchange_comm_unsupported_reason = renamed(logits_exchange_comm_blocker,
+                                                  "logits_exchange_comm_unsupported_reason")
+logits_gemm_exchange_unsupported_reason = renamed(logits_gemm_exchange_blocker,
+                                                  "logits_gemm_exchange_unsupported_reason")

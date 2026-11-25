@@ -66,7 +66,7 @@ def dispatch_us(module, name, call):
 
 
 def cases():
-    pkg = importlib.import_module(paged._SHAPE_HOSTS[(32, 128, 2048, 64)])
+    pkg = importlib.import_module(paged._ROUTES.hosts[(32, 128, 2048, 64)])
     for seqs, qlen, width in ((2, 6, 20480), (13, 5, 32768), (48, 4, 16384)):
         inputs = paged_inputs(seqs, qlen, width)
         rows = seqs * qlen
@@ -75,21 +75,21 @@ def cases():
         yield (f"mxfp4_paged_score_topk {seqs} x {qlen}, {width} keys", pkg, "mxfp4_paged_score_topk",
                lambda i=inputs, o=out: paged.mxfp4_paged_score_topk(**i, **o),
                lambda i=inputs, o=out: pkg.mxfp4_paged_score_topk(**i, **o),
-               lambda i=inputs, o=out: paged.mxfp4_paged_score_topk_unsupported_reason(**i, **o))
-    pkg = importlib.import_module(prefill._SCORE_HOSTS[(32, 128)])
+               lambda i=inputs, o=out: paged.mxfp4_paged_score_topk_blocker(**i, **o))
+    pkg = importlib.import_module(prefill._SCORE_ROUTES.hosts[(32, 128)])
     for rows, keys in ((512, 32768), (2048, 70000)):
         args = score_inputs(rows, keys)
         args = (*args, torch.empty(rows, args[3].shape[0] * 64, dtype=torch.float32, device="cuda"), 1.0)
         yield (f"mxfp4_prefill_score {rows} rows, {keys} keys", pkg, "score_rows",
                lambda a=args: prefill.mxfp4_prefill_score(*a), lambda a=args: pkg.score_rows(*a),
-               lambda a=args: prefill.mxfp4_prefill_score_unsupported_reason(*a))
-    pkg = importlib.import_module(prefill._TOPK_HOSTS[(2048,)])
+               lambda a=args: prefill.mxfp4_prefill_score_blocker(*a))
+    pkg = importlib.import_module(prefill._TOPK_ROUTES.hosts[(2048,)])
     for rows, width in ((256, 60000), (1024, 131072)):
         ks, ke = make_windows(rows, width, "causal")
         args = (make_logits("gauss", rows, width), ks, ke, torch.empty(rows, 2048, dtype=torch.int32, device="cuda"))
         yield (f"mxfp4_prefill_topk {rows} rows, {width} keys", pkg, "topk_rows",
                lambda a=args: prefill.mxfp4_prefill_topk(*a), lambda a=args: pkg.topk_rows(*a),
-               lambda a=args: prefill.mxfp4_prefill_topk_unsupported_reason(*a))
+               lambda a=args: prefill.mxfp4_prefill_topk_blocker(*a))
 
 
 def main():

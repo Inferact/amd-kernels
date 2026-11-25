@@ -13,16 +13,17 @@ import sys
 import pytest
 import torch
 
+from amd_kernels import routes
 from amd_kernels.sampling.markov_gumbel_common import host as E
 
-KEYS = sorted(E._SHAPE_HOSTS)
+KEYS = sorted(E._ROUTES.hosts)
 NAMES = list(inspect.signature(E.markov_gumbel_fused).parameters)
 
 
 @pytest.fixture
 def on_gfx950(monkeypatch):
     """gfx950, and meta tensors stand for tensors on the current device."""
-    monkeypatch.setattr(E, "available", lambda: True)
+    monkeypatch.setattr(routes, "available", lambda: True)
     monkeypatch.setattr(E, "_off_device", lambda **tensors: None)
 
 
@@ -44,20 +45,20 @@ def call(n=8, k=3, vocab=163840, rank=512, **change):
 
 
 def reason(*args):
-    return E.markov_gumbel_fused_unsupported_reason(*args)
+    return E.markov_gumbel_fused_blocker(*args)
 
 
 def test_table():
     assert E.markov_gumbel_fused_shapes() == frozenset(KEYS)
-    for key, name in E._SHAPE_HOSTS.items():
+    for key, name in E._ROUTES.hosts.items():
         pkg = importlib.import_module(name)
         assert (pkg.V, pkg.RANK) == key and callable(pkg.markov_gumbel_fused) and callable(pkg.scratch_dwords)
 
 
 @pytest.mark.parametrize("key", KEYS, ids=str)
 def test_routes_by_w1(key, on_gfx950, monkeypatch):
-    pkg = importlib.import_module(E._SHAPE_HOSTS[key])
-    assert E._shape_host(*key) is pkg
+    pkg = importlib.import_module(E._ROUTES.hosts[key])
+    assert E._ROUTES.host(key) is pkg
     args = call(vocab=key[0], rank=key[1])
     w1 = args[1]
     assert E.markov_max_rows(w1) == pkg.MAX_ROWS
@@ -73,7 +74,7 @@ def test_routes_by_w1(key, on_gfx950, monkeypatch):
 def test_uncovered_shape(on_gfx950):
     args = call(vocab=163840, rank=256)
     why = reason(*args)
-    assert "no kernel for (vocab, rank)=(163840, 256)" in why and str(KEYS) in why
+    assert "no kernel for vocab=163840, rank=256" in why and str(KEYS) in why
     for fn in (lambda: E.markov_gumbel_fused(*args), lambda: E.markov_max_rows(args[1]),
                lambda: E.markov_scratch_dwords(args[1], 8)):
         with pytest.raises(ValueError) as e:
@@ -82,7 +83,7 @@ def test_uncovered_shape(on_gfx950):
 
 
 def test_needs_gfx950(monkeypatch):
-    monkeypatch.setattr(E, "available", lambda: False)
+    monkeypatch.setattr(routes, "available", lambda: False)
     assert reason(*call()) == "markov_gumbel_fused: needs gfx950 with FlyDSL"
 
 
@@ -127,7 +128,7 @@ def test_row_mapping_optional(on_gfx950):
 
 
 def test_device_reasons(monkeypatch):
-    monkeypatch.setattr(E, "available", lambda: True)
+    monkeypatch.setattr(routes, "available", lambda: True)
     monkeypatch.setattr(torch.cuda, "current_device", lambda: 0)
     assert reason(*call()) == "markov_gumbel_fused: base on meta (the current CUDA device)"
     assert E._off_device(row_mapping=None, seeds=torch.empty(4)) == \
@@ -135,7 +136,7 @@ def test_device_reasons(monkeypatch):
 
 
 def test_reason_takes_the_ops_arguments():
-    op, why = inspect.signature(E.markov_gumbel_fused), inspect.signature(E.markov_gumbel_fused_unsupported_reason)
+    op, why = inspect.signature(E.markov_gumbel_fused), inspect.signature(E.markov_gumbel_fused_blocker)
     assert list(op.parameters.values()) == list(why.parameters.values())
 
 
@@ -144,3 +145,14 @@ def test_entry_import_imports_no_shape_package():
             "print(sorted(m for m in sys.modules if m.startswith('amd_kernels.sampling.markov_gumbel_fused')))")
     out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True).stdout
     assert out.strip() == "[]"
+
+
+def test_old_name_aliases_the_blocker():
+    from amd_kernels.sampling.markov_gumbel_common import markov_gumbel_fused_unsupported_reason
+    assert markov_gumbel_fused_unsupported_reason.renamed_to == "markov_gumbel_fused_blocker"
+
+
+def test_old_name_aliases_the_blocker():
+    from amd_kernels.sampling.markov_gumbel_common import markov_gumbel_fused_unsupported_reason
+
+    assert markov_gumbel_fused_unsupported_reason.renamed_to == "markov_gumbel_fused_blocker"

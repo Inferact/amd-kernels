@@ -22,7 +22,7 @@ def scenario():
     result = {}
     for key in sorted(bf16_latent_down_mxfp4_quant_shapes()):
         n, k = key
-        host = latent_down._shape_host(key)
+        host = latent_down._ROUTES.host(key)
         w = (torch.randn(n, k, device="cuda") * 0.02).bfloat16()
         bf16_latent_down_mxfp4_quant(torch.zeros(16, k, dtype=torch.bfloat16, device="cuda"), w)
         torch.cuda.synchronize()

@@ -19,18 +19,17 @@ ROWS = (1, 7, 64, 256)
 def worker(rank, errors):
     from amd_kernels.collectives.dcp8_topk_gather_merge_top2048 import TopkGatherMerge
     from amd_kernels.collectives.topk_gather_merge_common import (
+        topk_gather_merge_blocker,
         topk_gather_merge_comm,
-        topk_gather_merge_comm_unsupported_reason,
-        topk_gather_merge_unsupported_reason,
+        topk_gather_merge_comm_blocker,
     )
 
     dev = torch.device("cuda", rank)
     group = dist.group.WORLD
-    why = topk_gather_merge_comm_unsupported_reason(rank, group, dev, topk=K)
+    why = topk_gather_merge_comm_blocker(rank, group, dev, topk=K)
     if why is not None:
         errors.append(f"rank {rank}: factory reason {why}")
-    if "no kernel for topk=1024, world=8" not in (topk_gather_merge_comm_unsupported_reason(rank, group, dev,
-                                                                                            topk=1024) or ""):
+    if "no kernel for topk=1024, world=8" not in (topk_gather_merge_comm_blocker(rank, group, dev, topk=1024) or ""):
         errors.append(f"rank {rank}: no reason for topk 1024")
     comm = topk_gather_merge_comm(rank, group, dev, topk=K)
     direct = TopkGatherMerge(rank, group, dev)
@@ -46,7 +45,7 @@ def worker(rank, errors):
         for name, c in (("entry", comm), ("direct", direct)):
             slots = torch.full((rows * K,), -7, dtype=torch.int32, device=dev)
             indptr = torch.full((rows + 1,), -7, dtype=torch.int32, device=dev)
-            why = topk_gather_merge_unsupported_reason(c, *args, slots, indptr, PAGE, STRIDE)
+            why = topk_gather_merge_blocker(c, *args, slots, indptr, PAGE, STRIDE)
             if why is not None:
                 errors.append(f"rank {rank} rows {rows}: {why}")
             c(*args, slots, indptr, PAGE, STRIDE)
@@ -79,16 +78,16 @@ def worker(rank, errors):
                 errors.append(f"rank {rank}: graph replay != reference")
             del g
     a = (args[0][:, :1024].contiguous(), args[1][:, :1024].contiguous(), args[2], slots, indptr, PAGE, STRIDE)
-    why = topk_gather_merge_unsupported_reason(comm, *a) or ""
+    why = topk_gather_merge_blocker(comm, *a) or ""
     if "communicator built for topk=2048, world=8, call is topk=1024" not in why:
         errors.append(f"rank {rank}: reason for topk 1024: {why!r}")
-    if "is not a communicator of this entry" not in (topk_gather_merge_unsupported_reason(object(), *a) or ""):
+    if "is not a communicator of this entry" not in (topk_gather_merge_blocker(object(), *a) or ""):
         errors.append(f"rank {rank}: no reason for a foreign object")
     torch.cuda.synchronize()
     dist.barrier()
     comm.close()
     direct.close()
-    if topk_gather_merge_unsupported_reason(comm, *args, slots, indptr, PAGE, STRIDE) != (
+    if topk_gather_merge_blocker(comm, *args, slots, indptr, PAGE, STRIDE) != (
             "topk_gather_merge: communicator closed"):
         errors.append(f"rank {rank}: no reason for a closed communicator")
 

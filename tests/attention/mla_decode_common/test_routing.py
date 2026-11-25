@@ -15,36 +15,36 @@ import pytest
 import torch
 import torch.distributed as dist
 
+from amd_kernels import routes
 from amd_kernels.attention import mla_decode_common as E
 from amd_kernels.attention.mla_decode_common import combine, dense, prologue, query, sparse
 
 TABLES = [
-    (prologue._SHAPE_HOSTS, ("IndexSide", "qkv_a_norm_kv_insert", "supports_qkv_a_norm_kv_insert")),
-    (prologue._INDEX_HOSTS, ("indexer_prep", "supports_indexer_prep")),
-    (query._SHAPE_HOSTS, ("QueryGatherComm", "pack_q_b", "pack_w_uk", "q_b_allgather_wuk_all_heads")),
-    (sparse._SHAPE_HOSTS, ("fp8_sparse_mla_decode", "supports_fp8_sparse_mla_decode")),
-    (combine._SHAPE_HOSTS, ("DcpVupCombine", "dcp8_lse_combine_vup", "prepare_w_uv")),
-    (dense._SHAPE_HOSTS, ("fp8_dense_mla_decode", "supports_fp8_dense_mla_decode")),
+    (prologue._ROUTES.hosts, ("IndexSide", "qkv_a_norm_kv_insert", "supports_qkv_a_norm_kv_insert")),
+    (prologue._INDEX_ROUTES.hosts, ("indexer_prep", "supports_indexer_prep")),
+    (query._ROUTES.hosts, ("QueryGatherComm", "pack_q_b", "pack_w_uk", "q_b_allgather_wuk_all_heads")),
+    (sparse._ROUTES.hosts, ("fp8_sparse_mla_decode", "supports_fp8_sparse_mla_decode")),
+    (combine._ROUTES.hosts, ("DcpVupCombine", "dcp8_lse_combine_vup", "prepare_w_uv")),
+    (dense._ROUTES.hosts, ("fp8_dense_mla_decode", "supports_fp8_dense_mla_decode")),
 ]
 SHAPES = [
-    (E.qkv_a_norm_kv_insert_shapes, prologue._SHAPE_HOSTS),
-    (E.indexer_prep_shapes, prologue._INDEX_HOSTS),
-    (E.q_bproj_wuk_gather_shapes, query._SHAPE_HOSTS),
-    (E.fp8_sparse_mla_decode_shapes, sparse._SHAPE_HOSTS),
-    (E.lse_combine_vup_shapes, combine._SHAPE_HOSTS),
-    (E.fp8_dense_mla_decode_shapes, dense._SHAPE_HOSTS),
+    (E.qkv_a_norm_kv_insert_shapes, prologue._ROUTES.hosts),
+    (E.indexer_prep_shapes, prologue._INDEX_ROUTES.hosts),
+    (E.q_bproj_wuk_gather_shapes, query._ROUTES.hosts),
+    (E.fp8_sparse_mla_decode_shapes, sparse._ROUTES.hosts),
+    (E.lse_combine_vup_shapes, combine._ROUTES.hosts),
+    (E.fp8_dense_mla_decode_shapes, dense._ROUTES.hosts),
 ]
 PAIRS = [
-    (E.qkv_a_norm_kv_insert, E.qkv_a_norm_kv_insert_unsupported_reason),
-    (E.indexer_prep, E.indexer_prep_unsupported_reason),
-    (E.q_gather_comm, E.q_gather_comm_unsupported_reason),
-    (E.q_bproj_wuk_gather, E.q_bproj_wuk_gather_unsupported_reason),
-    (E.fp8_sparse_mla_decode, E.fp8_sparse_mla_decode_unsupported_reason),
-    (E.lse_combine_comm, E.lse_combine_comm_unsupported_reason),
-    (E.lse_combine_vup, E.lse_combine_vup_unsupported_reason),
-    (E.fp8_dense_mla_decode, E.fp8_dense_mla_decode_unsupported_reason),
+    (E.qkv_a_norm_kv_insert, E.qkv_a_norm_kv_insert_blocker),
+    (E.indexer_prep, E.indexer_prep_blocker),
+    (E.q_gather_comm, E.q_gather_comm_blocker),
+    (E.q_bproj_wuk_gather, E.q_bproj_wuk_gather_blocker),
+    (E.fp8_sparse_mla_decode, E.fp8_sparse_mla_decode_blocker),
+    (E.lse_combine_comm, E.lse_combine_comm_blocker),
+    (E.lse_combine_vup, E.lse_combine_vup_blocker),
+    (E.fp8_dense_mla_decode, E.fp8_dense_mla_decode_blocker),
 ]
-MODULES = (prologue, query, sparse, combine, dense)
 
 
 def meta(*shape, dtype=torch.bfloat16):
@@ -62,8 +62,7 @@ class Recorder:
 
 @pytest.fixture
 def gpu_ok(monkeypatch):
-    for m in MODULES:
-        monkeypatch.setattr(m, "available", lambda: True)
+    monkeypatch.setattr(routes, "available", lambda: True)
 
 
 @pytest.fixture(scope="module")
@@ -98,7 +97,7 @@ def test_import_loads_no_shape_package():
     code = (
         "import sys, json; import amd_kernels.attention.mla_decode_common as m; "
         "print(json.dumps(sorted(k for k in sys.modules if k.startswith('amd_kernels.attention.') "
-        "and not k.startswith('amd_kernels.attention.mla_decode_common'))))"
+        "and '_common' not in k)))"
     )
     out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=300, check=True)
     assert json.loads(out.stdout.strip().splitlines()[-1]) == []
@@ -150,7 +149,7 @@ def combine_args(comm, n, heads=96):
 def test_routes_each_covered_key(monkeypatch):
     for n in (1, 192):
         for index in (True, False):
-            pkg = prologue._shape_host((1536, 512))
+            pkg = prologue._ROUTES.host((1536, 512))
             rec = Recorder()
             monkeypatch.setattr(pkg, "qkv_a_norm_kv_insert", rec)
             args = insert_args(n, index=index)
@@ -163,42 +162,42 @@ def test_routes_each_covered_key(monkeypatch):
                 assert all(getattr(got_side, k) is v for k, v in args[8].items())
             else:
                 assert got[8] is None
-        pkg = prologue._index_host((32, 128))
+        pkg = prologue._INDEX_ROUTES.host((32, 128))
         monkeypatch.setattr(pkg, "indexer_prep", rec := Recorder())
         E.indexer_prep(*prep_args(n))
         assert len(rec.calls) == 1
         for q8 in (False, True):
-            pkg = sparse._shape_host((96, 576, 656))
+            pkg = sparse._ROUTES.host((96, 576, 656))
             monkeypatch.setattr(pkg, "fp8_sparse_mla_decode", rec := Recorder())
             args, kw = sparse_args(n, q8=q8)
             assert E.fp8_sparse_mla_decode(*args, **kw) == "routed" and rec.calls[0][0][-1] is kw.get("q8")
-        pkg = dense._shape_host((96, 576))
+        pkg = dense._ROUTES.host((96, 576))
         monkeypatch.setattr(pkg, "fp8_dense_mla_decode", rec := Recorder())
         assert E.fp8_dense_mla_decode(*dense_args(4 * n)) == "routed"
-        pkg = query._shape_host((1536, 2304, 96, 8))
+        pkg = query._ROUTES.host((1536, 2304, 96, 8))
         monkeypatch.setattr(pkg, "q_b_allgather_wuk_all_heads", rec := Recorder())
-        args, kw = query_args(comm_of(query._SHAPE_HOSTS, "QueryGatherComm", "q"), n)
+        args, kw = query_args(comm_of(query._ROUTES.hosts, "QueryGatherComm", "q"), n)
         assert E.q_bproj_wuk_gather(*args, **kw) == "routed" and rec.calls[0] == (args, {**kw, "out_q8": None})
-        pkg = combine._shape_host((96, 128, 512, 8))
+        pkg = combine._ROUTES.host((96, 128, 512, 8))
         monkeypatch.setattr(pkg, "dcp8_lse_combine_vup", rec := Recorder())
-        args, _ = combine_args(comm_of(combine._SHAPE_HOSTS, "DcpVupCombine"), n)
+        args, _ = combine_args(comm_of(combine._ROUTES.hosts, "DcpVupCombine"), n)
         assert E.lse_combine_vup(*args) == "routed" and rec.calls[0] == (args, {})
 
 
 def test_kernel_lookup_returns_the_routed_entry():
-    pkg = prologue._shape_host((1536, 512))
+    pkg = prologue._ROUTES.host((1536, 512))
     run = E.qkv_a_norm_kv_insert_kernel(*insert_args(2))
     assert run.entry.name == pkg.qkv_a_norm_kv_insert.entry.name
     inputs = run.entry.inputs(run.entry.mode(*insert_args(2)), 1, *insert_args(2))
     assert isinstance(inputs[0][8], pkg.IndexSide)  # the warm-up takes the dict side
-    assert E.indexer_prep_kernel(*prep_args(2)) is prologue._index_host((32, 128)).indexer_prep
+    assert E.indexer_prep_kernel(*prep_args(2)) is prologue._INDEX_ROUTES.host((32, 128)).indexer_prep
     args, kw = sparse_args(2)
-    assert E.fp8_sparse_mla_decode_kernel(*args, **kw) is sparse._shape_host((96, 576, 656)).fp8_sparse_mla_decode
-    args, kw = query_args(comm_of(query._SHAPE_HOSTS, "QueryGatherComm", "q"), 2)
-    routed = query._shape_host((1536, 2304, 96, 8)).q_b_allgather_wuk_all_heads
+    assert E.fp8_sparse_mla_decode_kernel(*args, **kw) is sparse._ROUTES.host((96, 576, 656)).fp8_sparse_mla_decode
+    args, kw = query_args(comm_of(query._ROUTES.hosts, "QueryGatherComm", "q"), 2)
+    routed = query._ROUTES.host((1536, 2304, 96, 8)).q_b_allgather_wuk_all_heads
     assert E.q_bproj_wuk_gather_kernel(*args, **kw) is routed
-    args, _ = combine_args(comm_of(combine._SHAPE_HOSTS, "DcpVupCombine"), 2)
-    assert E.lse_combine_vup_kernel(*args) is combine._shape_host((96, 128, 512, 8)).dcp8_lse_combine_vup
+    args, _ = combine_args(comm_of(combine._ROUTES.hosts, "DcpVupCombine"), 2)
+    assert E.lse_combine_vup_kernel(*args) is combine._ROUTES.host((96, 128, 512, 8)).dcp8_lse_combine_vup
 
 
 def off_table_cases():
@@ -217,8 +216,8 @@ def off_table_cases():
 
 @pytest.mark.parametrize("name,args,kw,dims", off_table_cases(), ids=lambda x: x if isinstance(x, str) else "")
 def test_off_table_gives_the_reason_and_the_op_and_kernel_raise_it(name, args, kw, dims):
-    why = getattr(E, name + "_unsupported_reason")(*args, **kw)
-    assert why.startswith(f"{name}: no kernel for {dims}") and "covered: (" in why, why
+    why = getattr(E, name + "_blocker")(*args, **kw)
+    assert why.startswith(f"{name}: no kernel for {dims}") and "covered: [(" in why, why
     for fn in (getattr(E, name), getattr(E, name + "_kernel", None)):
         if fn is not None:
             with pytest.raises(ValueError) as e:
@@ -227,11 +226,11 @@ def test_off_table_gives_the_reason_and_the_op_and_kernel_raise_it(name, args, k
 
 
 def test_factories_read_the_world_from_the_group(group):
-    why = E.q_gather_comm_unsupported_reason(0, group, "cpu", "q", q_lora=1536, q_b_rows=2304, heads=96)
+    why = E.q_gather_comm_blocker(0, group, "cpu", "q", q_lora=1536, q_b_rows=2304, heads=96)
     assert why.startswith("q_gather_comm: no kernel for q_lora=1536, q_b_rows=2304, heads=96, world=1"), why
     with pytest.raises(ValueError, match="world=1"):
         E.q_gather_comm(0, group, "cpu", "q", q_lora=1536, q_b_rows=2304, heads=96)
-    why = E.lse_combine_comm_unsupported_reason(0, group, "cpu", heads=96, v_head=128, kv_lora=512)
+    why = E.lse_combine_comm_blocker(0, group, "cpu", heads=96, v_head=128, kv_lora=512)
     assert why.startswith("lse_combine_comm: no kernel for heads=96, v_head=128, kv_lora=512, world=1"), why
     with pytest.raises(ValueError, match="world=1"):
         E.lse_combine_comm(0, group, "cpu", heads=96, v_head=128, kv_lora=512)
@@ -240,36 +239,35 @@ def test_factories_read_the_world_from_the_group(group):
 def test_factory_reasons_without_a_process_group(monkeypatch):
     monkeypatch.setattr(dist, "is_initialized", lambda: False)
     dims = dict(q_lora=1536, q_b_rows=2304, heads=96)
-    assert "needs an initialized" in E.q_gather_comm_unsupported_reason(0, None, "cpu", "q", **dims)
+    assert "needs an initialized" in E.q_gather_comm_blocker(0, None, "cpu", "q", **dims)
     dims = dict(heads=96, v_head=128, kv_lora=512)
-    assert "needs an initialized" in E.lse_combine_comm_unsupported_reason(0, None, "cpu", **dims)
+    assert "needs an initialized" in E.lse_combine_comm_blocker(0, None, "cpu", **dims)
 
 
 def test_factory_reasons_past_the_key(monkeypatch, gpu_ok):
     monkeypatch.setattr(dist, "is_initialized", lambda: True)
     monkeypatch.setattr(dist, "get_world_size", lambda group=None: 8)
     ok = dict(q_lora=1536, q_b_rows=2304, heads=96)
-    assert E.q_gather_comm_unsupported_reason(0, None, "cpu", "q", **ok) is None
-    assert "mode 'x'" in E.q_gather_comm_unsupported_reason(0, None, "cpu", "x", **ok)
+    assert E.q_gather_comm_blocker(0, None, "cpu", "q", **ok) is None
+    assert "mode 'x'" in E.q_gather_comm_blocker(0, None, "cpu", "x", **ok)
     ok = dict(heads=96, v_head=128, kv_lora=512)
-    assert E.lse_combine_comm_unsupported_reason(0, None, "cpu", **ok) is None
-    assert "max_tokens 257 (the kernel takes 1..256)" in E.lse_combine_comm_unsupported_reason(
+    assert E.lse_combine_comm_blocker(0, None, "cpu", **ok) is None
+    assert "max_tokens 257 (the kernel takes 1..256)" in E.lse_combine_comm_blocker(
         0, None, "cpu", **ok, max_tokens=257)
-    monkeypatch.setattr(combine, "available", lambda: False)
-    assert E.lse_combine_comm_unsupported_reason(0, None, "cpu", **ok) == "lse_combine_comm: needs gfx950 with FlyDSL"
+    monkeypatch.setattr(routes, "available", lambda: False)
+    assert E.lse_combine_comm_blocker(0, None, "cpu", **ok) == "lse_combine_comm: needs gfx950 with FlyDSL"
 
 
 def test_needs_gfx950(monkeypatch):
-    for m in MODULES:
-        monkeypatch.setattr(m, "available", lambda: False)
+    monkeypatch.setattr(routes, "available", lambda: False)
     args, kw = sparse_args(4)
     cases = [
-        (E.qkv_a_norm_kv_insert_unsupported_reason, insert_args(4), {}),
-        (E.indexer_prep_unsupported_reason, prep_args(4), {}),
-        (E.fp8_sparse_mla_decode_unsupported_reason, args, kw),
-        (E.fp8_dense_mla_decode_unsupported_reason, dense_args(4), {}),
-        (E.q_bproj_wuk_gather_unsupported_reason, *query_args(comm_of(query._SHAPE_HOSTS, "QueryGatherComm", "q"), 4)),
-        (E.lse_combine_vup_unsupported_reason, *combine_args(comm_of(combine._SHAPE_HOSTS, "DcpVupCombine"), 4)),
+        (E.qkv_a_norm_kv_insert_blocker, insert_args(4), {}),
+        (E.indexer_prep_blocker, prep_args(4), {}),
+        (E.fp8_sparse_mla_decode_blocker, args, kw),
+        (E.fp8_dense_mla_decode_blocker, dense_args(4), {}),
+        (E.q_bproj_wuk_gather_blocker, *query_args(comm_of(query._ROUTES.hosts, "QueryGatherComm", "q"), 4)),
+        (E.lse_combine_vup_blocker, *combine_args(comm_of(combine._ROUTES.hosts, "DcpVupCombine"), 4)),
     ]
     for reason, a, k in cases:
         assert reason(*a, **k).endswith(": needs gfx950 with FlyDSL"), reason.__name__
@@ -286,7 +284,7 @@ def mutate(args, kw, i, value):
 
 QUERY_BRANCHES = [
     (None, None, None),
-    (0, comm_of(query._SHAPE_HOSTS, "QueryGatherComm", "latent"), "communicator mode 'latent'"),
+    (0, comm_of(query._ROUTES.hosts, "QueryGatherComm", "latent"), "communicator mode 'latent'"),
     (1, meta(4, 1024), "communicator built for q_lora=1536, q_b_rows=2304, heads=96, world=8, call is q_lora=1024"),
     (2, meta(4608, 1536), "call is q_lora=1536, q_b_rows=4608"),
     (1, meta(0, 1536), "0 rows (the kernel takes 1..256)"),
@@ -302,10 +300,10 @@ QUERY_BRANCHES = [
 
 @pytest.mark.parametrize("i,value,text", QUERY_BRANCHES)
 def test_query_reasons(gpu_ok, i, value, text):
-    args, kw = query_args(comm_of(query._SHAPE_HOSTS, "QueryGatherComm", "q"), 4)
+    args, kw = query_args(comm_of(query._ROUTES.hosts, "QueryGatherComm", "q"), 4)
     if i is not None:
         args, kw = mutate(args, kw, i, value)
-    why = E.q_bproj_wuk_gather_unsupported_reason(*args, **kw)
+    why = E.q_bproj_wuk_gather_blocker(*args, **kw)
     assert (why is None) if text is None else (text in why), why
 
 
@@ -331,18 +329,18 @@ COMBINE_BRANCHES = [
 
 @pytest.mark.parametrize("i,value,text", COMBINE_BRANCHES)
 def test_combine_reasons(gpu_ok, i, value, text):
-    args, kw = combine_args(comm_of(combine._SHAPE_HOSTS, "DcpVupCombine"), 4)
+    args, kw = combine_args(comm_of(combine._ROUTES.hosts, "DcpVupCombine"), 4)
     if i is not None:
         args, kw = mutate(args, kw, i, value)
-    why = E.lse_combine_vup_unsupported_reason(*args, **kw)
+    why = E.lse_combine_vup_blocker(*args, **kw)
     assert (why is None) if text is None else (text in why), why
 
 
 def test_combine_rows_capped_by_the_communicator(gpu_ok):
-    comm = comm_of(combine._SHAPE_HOSTS, "DcpVupCombine")
+    comm = comm_of(combine._ROUTES.hosts, "DcpVupCombine")
     comm.max_tokens = 64
     args, _ = combine_args(comm, 65)
-    assert "65 rows (the kernel takes 1..64)" in E.lse_combine_vup_unsupported_reason(*args)
+    assert "65 rows (the kernel takes 1..64)" in E.lse_combine_vup_blocker(*args)
 
 
 def test_weight_packers_route_by_shape():
@@ -358,17 +356,49 @@ def test_weight_packers_route_by_shape():
 def test_shape_reasons_before_the_package(gpu_ok):
     args = insert_args(4)
     flat = mutate(args, {}, 4, meta(4 * 1536))[0]
-    assert "operand layout (q_out, kv_out" in E.qkv_a_norm_kv_insert_unsupported_reason(*flat)
+    assert "operand layout (q_out, kv_out" in E.qkv_a_norm_kv_insert_blocker(*flat)
     flat = mutate(prep_args(4), {}, 0, meta(4, 4096))[0]
-    assert "operand layout (q [rows" in E.indexer_prep_unsupported_reason(*flat)
+    assert "operand layout (q [rows" in E.indexer_prep_blocker(*flat)
     d = dense_args(8)
-    assert "query_len 5 (the kernel takes 1..4)" in E.fp8_dense_mla_decode_unsupported_reason(*mutate(d, {}, 8, 5)[0])
-    assert "operand layout (7 rows" in E.fp8_dense_mla_decode_unsupported_reason(*mutate(d, {}, 0, meta(7, 96, 576))[0])
+    assert "query_len 5 (the kernel takes 1..4)" in E.fp8_dense_mla_decode_blocker(*mutate(d, {}, 8, 5)[0])
+    assert "operand layout (7 rows" in E.fp8_dense_mla_decode_blocker(*mutate(d, {}, 0, meta(7, 96, 576))[0])
     many = mutate(d, {}, 0, meta(256, 96, 576, dtype=torch.float8_e4m3fn))[0]
-    assert "64 requests (the kernel takes 0..63)" in E.fp8_dense_mla_decode_unsupported_reason(*many)
-    assert "cp_rank 8 of cp_world 8" in E.fp8_dense_mla_decode_unsupported_reason(*d, cp_rank=8)
+    assert "64 requests (the kernel takes 0..63)" in E.fp8_dense_mla_decode_blocker(*many)
+    assert "cp_rank 8 of cp_world 8" in E.fp8_dense_mla_decode_blocker(*d, cp_rank=8)
     sa, skw = sparse_args(4)
-    assert "operand layout (q or q8" in E.fp8_sparse_mla_decode_unsupported_reason(None, *sa[1:])
+    assert "operand layout (q or q8" in E.fp8_sparse_mla_decode_blocker(None, *sa[1:])
     for q8 in (False, True):
         sa, skw = sparse_args(257, q8=q8)
-        assert "257 rows (the kernel takes 0..256)" in E.fp8_sparse_mla_decode_unsupported_reason(*sa, **skw)
+        assert "257 rows (the kernel takes 0..256)" in E.fp8_sparse_mla_decode_blocker(*sa, **skw)
+
+
+ALIASES = [
+    ("qkv_a_norm_kv_insert", insert_args(4), {}),
+    ("indexer_prep", prep_args(4), {}),
+    ("fp8_sparse_mla_decode", *sparse_args(4)),
+    ("fp8_dense_mla_decode", dense_args(4), {}),
+    ("q_bproj_wuk_gather", *query_args(comm_of(query._ROUTES.hosts, "QueryGatherComm", "q"), 4)),
+    ("lse_combine_vup", *combine_args(comm_of(combine._ROUTES.hosts, "DcpVupCombine"), 4)),
+    ("q_gather_comm", (0, None, "cpu", "q"), dict(q_lora=1536, q_b_rows=2304, heads=96)),
+    ("lse_combine_comm", (0, None, "cpu"), dict(heads=96, v_head=128, kv_lora=512)),
+]
+
+
+@pytest.mark.parametrize("name,args,kw", ALIASES, ids=[a[0] for a in ALIASES])
+def test_renamed_aliases(monkeypatch, gpu_ok, name, args, kw):
+    monkeypatch.setattr(dist, "is_initialized", lambda: True)
+    monkeypatch.setattr(dist, "get_world_size", lambda group=None: 8)
+    alias = getattr(E, name + "_unsupported_reason")
+    assert alias.renamed_to == name + "_blocker" and alias.__name__ not in E.__all__
+    assert alias(*args, **kw) == getattr(E, name + "_blocker")(*args, **kw)
+
+
+def test_prepare_comms_return_the_reason(monkeypatch):
+    monkeypatch.setattr(dist, "is_initialized", lambda: False)
+    why = E.prepare_q_gather_comm(0, None, "cpu", "q", q_lora=1536, q_b_rows=2304, heads=96)
+    assert why == E.q_gather_comm_blocker(0, None, "cpu", "q", q_lora=1536, q_b_rows=2304, heads=96)
+    why = E.prepare_lse_combine_comm(0, None, "cpu", heads=96, v_head=128, kv_lora=512)
+    assert why == E.lse_combine_comm_blocker(0, None, "cpu", heads=96, v_head=128, kv_lora=512)
+    assert "needs an initialized" in why
+    for prep, factory in ((E.prepare_q_gather_comm, E.q_gather_comm), (E.prepare_lse_combine_comm, E.lse_combine_comm)):
+        assert inspect.signature(prep).parameters == inspect.signature(factory).parameters

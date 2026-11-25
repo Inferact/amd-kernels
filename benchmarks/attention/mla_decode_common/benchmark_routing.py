@@ -5,7 +5,7 @@
 Graph replay: one graph of ``--copies`` entry calls and one of the same direct calls (same operands), replayed
 alternately, min of 2 x ``--rounds`` replays, us per call. Host: the eager dispatch with the routed package function
 replaced by a no-op, minus the no-op called directly (the Python the entry adds per eager call), and one
-``<op>_unsupported_reason`` call; min of ``--rounds`` loops of 2000 calls. ``--ranks8``: the two 8-rank ops' graph
+``<op>_blocker`` call; min of ``--rounds`` loops of 2000 calls. ``--ranks8``: the two 8-rank ops' graph
 replay on 8 GPUs (max over ranks).
 """
 
@@ -95,31 +95,31 @@ def dense_args(qlen, reqs, local=2000):
 
 
 def single(args):
-    pkg_insert = prologue._shape_host((1536, 512))
-    pkg_prep = prologue._index_host((32, 128))
-    pkg_sparse = sparse._shape_host((96, 576, 656))
-    pkg_dense = dense._shape_host((96, 576))
+    pkg_insert = prologue._ROUTES.host((1536, 512))
+    pkg_prep = prologue._INDEX_ROUTES.host((32, 128))
+    pkg_sparse = sparse._ROUTES.host((96, 576, 656))
+    pkg_dense = dense._ROUTES.host((96, 576))
     cases = []
     for m in (12, 192):
         a = insert_args(m)
         direct = (*a[:8], pkg_insert.IndexSide(**a[8]))
         cases.append((f"qkv_a_norm_kv_insert + index, M {m}", lambda a=a: E.qkv_a_norm_kv_insert(*a),
                       lambda d=direct: pkg_insert.qkv_a_norm_kv_insert(*d), pkg_insert, "qkv_a_norm_kv_insert", a,
-                      E.qkv_a_norm_kv_insert, E.qkv_a_norm_kv_insert_unsupported_reason))
+                      E.qkv_a_norm_kv_insert, E.qkv_a_norm_kv_insert_blocker))
     for m in (12, 192):
         a = prep_args(m)
         cases.append((f"indexer_prep, M {m}", lambda a=a: E.indexer_prep(*a), lambda a=a: pkg_prep.indexer_prep(*a),
-                      pkg_prep, "indexer_prep", a, E.indexer_prep, E.indexer_prep_unsupported_reason))
+                      pkg_prep, "indexer_prep", a, E.indexer_prep, E.indexer_prep_blocker))
     for m in (12, 256):
         a = sparse_args(m)
         cases.append((f"fp8_sparse_mla_decode, M {m}", lambda a=a: E.fp8_sparse_mla_decode(*a),
                       lambda a=a: pkg_sparse.fp8_sparse_mla_decode(*a), pkg_sparse, "fp8_sparse_mla_decode", a,
-                      E.fp8_sparse_mla_decode, E.fp8_sparse_mla_decode_unsupported_reason))
+                      E.fp8_sparse_mla_decode, E.fp8_sparse_mla_decode_blocker))
     for qlen, reqs in ((4, 13), (3, 48)):
         a = dense_args(qlen, reqs)
         cases.append((f"fp8_dense_mla_decode, {reqs} x {qlen} rows", lambda a=a: E.fp8_dense_mla_decode(*a),
                       lambda a=a: pkg_dense.fp8_dense_mla_decode(*a), pkg_dense, "fp8_dense_mla_decode", a,
-                      E.fp8_dense_mla_decode, E.fp8_dense_mla_decode_unsupported_reason))
+                      E.fp8_dense_mla_decode, E.fp8_dense_mla_decode_blocker))
     print("| op, shape | direct us | entry us | added us | host: dispatch added us | host: reason us |")
     print("|---|---|---|---|---|---|")
     for name, entry, direct, pkg, attr, a, op, reason in cases:
@@ -141,12 +141,12 @@ def host_comm(args):
     """The comm-routed ops' added host time and reason, on communicator objects that launch nothing."""
     for mod, cls, attr, op, reason, a in (
         (query, "QueryGatherComm", "q_b_allgather_wuk_all_heads", E.q_bproj_wuk_gather,
-         E.q_bproj_wuk_gather_unsupported_reason, lambda c, m: (c, z(m, 1536), z(2304, 1536), z(96, 8, 4, 4, 4, 16, 8),
+         E.q_bproj_wuk_gather_blocker, lambda c, m: (c, z(m, 1536), z(2304, 1536), z(96, 8, 4, 4, 4, 16, 8),
                                                                  z(m, 96, 576))),
-        (combine, "DcpVupCombine", "dcp8_lse_combine_vup", E.lse_combine_vup, E.lse_combine_vup_unsupported_reason,
+        (combine, "DcpVupCombine", "dcp8_lse_combine_vup", E.lse_combine_vup, E.lse_combine_vup_blocker,
          lambda c, m: (c, z(m, 96, 512), z(m, 96, dtype=torch.float32), z(96, 128, 512), z(m, 12, 128))),
     ):
-        pkg = mod._shape_host(next(iter(mod._SHAPE_HOSTS)))
+        pkg = mod._ROUTES.host(next(iter(mod._ROUTES.hosts)))
         comm = object.__new__(getattr(pkg, cls))
         comm.mode, comm.max_tokens = "q", 256
         operands = a(comm, 12)
@@ -168,8 +168,8 @@ def _rank_main(rank, port, args, results):
     dist.init_process_group("gloo", init_method=f"tcp://127.0.0.1:{port}", rank=rank, world_size=8)
     group, dev = dist.group.WORLD, torch.device("cuda", rank)
     warm_up.set_workers(4)
-    q_pkg = query._shape_host((1536, 2304, 96, 8))
-    c_pkg = combine._shape_host((96, 128, 512, 8))
+    q_pkg = query._ROUTES.host((1536, 2304, 96, 8))
+    c_pkg = combine._ROUTES.host((96, 128, 512, 8))
     qc = E.q_gather_comm(rank, group, dev, "q", q_lora=1536, q_b_rows=2304, heads=96)
     cc = E.lse_combine_comm(rank, group, dev, heads=96, v_head=128, kv_lora=512)
     wq, wu = E.pack_q_b(r(2304, 1536, scale=0.03)), E.pack_w_uk(r(96, 128, 512, scale=0.05))

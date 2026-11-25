@@ -1,34 +1,20 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the amd-kernels project
 """KDA decode layer in one persistent launch (AttnRes seam to the gated core output): a workspace is built for a
-(hidden, heads, head_dim) key (``_SHAPE_HOSTS``, imported on the first build of its key); a call routes by its
+(hidden, heads, head_dim) key (``_ROUTES``, imported on the first build of its key); a call routes by its
 workspace's package."""
 
 import functools
-import importlib
-import sys
 
 import torch
 
-from . import device as _dev
+from amd_kernels import routes
+from amd_kernels.routes import Routes, prepare, renamed
 
-_SHAPE_HOSTS = {(7168, 12, 128): "amd_kernels.attention.kda_mono_decode_k1_h12_d128"}
-_OP = "kda_mono_decode"
-
-
-@functools.cache
-def _shape_host(key):
-    name = _SHAPE_HOSTS.get(key)
-    return importlib.import_module(name) if name is not None else None
-
-
-@functools.cache
-def _workspace_key(cls):
-    for key, name in _SHAPE_HOSTS.items():
-        pkg = sys.modules.get(name)
-        if pkg is not None and pkg.Workspace is cls:
-            return key
-    return None
+_NAMES = ("hidden", "heads", "head_dim")
+_ROUTES = Routes("kda_mono_decode", {(7168, 12, 128): "amd_kernels.attention.kda_mono_decode_k1_h12_d128"}, _NAMES)
+_WS_ROUTES = Routes("kda_mono_workspace", _ROUTES.hosts, _NAMES)
+_OP = _ROUTES.op
 
 
 def _key(prefix, rstate):
@@ -43,33 +29,28 @@ def _scratch_bytes(pkg, tokens):
     return k.scratch_bytes(k.KdaPreBuild(tokens=tokens, qlen=tokens, nblocks=1, delta=True, state_len=k.CONV_W - 1))
 
 
-def _no_workspace_kernel(hidden, heads, head_dim):
-    return (f"kda_mono_workspace: no kernel for hidden={hidden}, heads={heads}, head_dim={head_dim} "
-            f"(covered: {sorted(_SHAPE_HOSTS)})")
-
-
 def kda_mono_decode_shapes() -> frozenset[tuple[int, int, int]]:
     """The (hidden, heads, head_dim) with a kernel."""
-    return frozenset(_SHAPE_HOSTS)
+    return _ROUTES.shapes()
 
 
 def kda_mono_workspace(device, *, hidden, heads, head_dim, max_tokens=None, max_blocks=8):
     """The routed package's ``Workspace`` (``begin_step()`` once a step, ``failed()``); ``max_tokens`` None: the
     package's most rows a launch."""
-    pkg = _shape_host((hidden, heads, head_dim))
-    if pkg is None:
-        raise ValueError(_no_workspace_kernel(hidden, heads, head_dim))
+    pkg = _WS_ROUTES.package((hidden, heads, head_dim))
     return pkg.Workspace(device, pkg.host.MAX_S if max_tokens is None else max_tokens, max_blocks)
 
 
-def kda_mono_workspace_unsupported_reason(device, *, hidden, heads, head_dim, max_tokens=None, max_blocks=8):
+def kda_mono_workspace_blocker(device, *, hidden, heads, head_dim, max_tokens=None, max_blocks=8):
     """None when ``kda_mono_workspace`` builds a workspace for these arguments, else why not."""
-    op = "kda_mono_workspace"
-    if not _dev.available():
+    op = _WS_ROUTES.op
+    if not routes.available():
         return f"{op}: needs gfx950 with FlyDSL"
-    pkg = _shape_host((hidden, heads, head_dim))
-    if pkg is None:
-        return _no_workspace_kernel(hidden, heads, head_dim)
+    key = (hidden, heads, head_dim)
+    reason = _WS_ROUTES.blocker(key)
+    if reason is not None:
+        return reason
+    pkg = _WS_ROUTES.package(key)
     hi = pkg.host.MAX_S
     if max_tokens is not None and not 1 <= max_tokens <= hi:
         return f"{op}: {max_tokens} rows (the kernel takes 1..{hi})"
@@ -78,37 +59,47 @@ def kda_mono_workspace_unsupported_reason(device, *, hidden, heads, head_dim, ma
     return None
 
 
+def prepare_kda_mono_workspace(device, *, hidden, heads, head_dim, max_tokens=None, max_blocks=8):
+    """``kda_mono_workspace(...)``, or the reason it cannot be built."""
+    return prepare(
+        kda_mono_workspace_blocker(device, hidden=hidden, heads=heads, head_dim=head_dim, max_tokens=max_tokens,
+                                   max_blocks=max_blocks),
+        lambda: kda_mono_workspace(device, hidden=hidden, heads=heads, head_dim=head_dim, max_tokens=max_tokens,
+                                   max_blocks=max_blocks))
+
+
 def kda_mono_decode(ws, layer, prefix, delta, blocks, ares_nw, ares_qk, in_nw, w_in, w_fb, conv_w, conv_state, a_log,
                     dt_bias, on_w, rstate, st_idx, num_acc, *, qlen, nblocks, write_idx=-1, eps=1e-5, out_eps=1e-5,
                     onorm_eps=1e-5, lower_bound=-5.0):
     """One KDA layer of a spec-verify step on ``ws`` (``kda_mono_workspace``); returns ``core`` [S, heads * d]."""
-    key = _workspace_key(type(ws))
+    key = _ROUTES.owner(type(ws))
     if key is None:
         raise ValueError(f"{_OP}: {type(ws).__name__} is not a kda_mono_workspace")
-    return _shape_host(key).kda_mono_decode_k1(
+    return _ROUTES.package(key).kda_mono_decode_k1(
         ws, layer, prefix, delta, blocks, ares_nw, ares_qk, in_nw, w_in, w_fb, conv_w, conv_state, a_log, dt_bias,
         on_w, rstate, st_idx, num_acc, qlen=qlen, nblocks=nblocks, write_idx=write_idx, eps=eps, out_eps=out_eps,
         onorm_eps=onorm_eps, lower_bound=lower_bound,
     )  # fmt: skip
 
 
-def kda_mono_decode_unsupported_reason(ws, layer, prefix, delta, blocks, ares_nw, ares_qk, in_nw, w_in, w_fb, conv_w,
-                                       conv_state, a_log, dt_bias, on_w, rstate, st_idx, num_acc, *, qlen, nblocks,
-                                       write_idx=-1, eps=1e-5, out_eps=1e-5, onorm_eps=1e-5,
-                                       lower_bound=-5.0) -> str | None:
+def kda_mono_decode_blocker(ws, layer, prefix, delta, blocks, ares_nw, ares_qk, in_nw, w_in, w_fb, conv_w, conv_state,
+                            a_log, dt_bias, on_w, rstate, st_idx, num_acc, *, qlen, nblocks, write_idx=-1, eps=1e-5,
+                            out_eps=1e-5, onorm_eps=1e-5, lower_bound=-5.0) -> str | None:
     """None when ``kda_mono_decode`` serves this call, else why not (host checks only)."""
-    if not _dev.available():
+    if not routes.available():
         return f"{_OP}: needs gfx950 with FlyDSL"
     key = _key(prefix, rstate)
-    if key not in _SHAPE_HOSTS:
-        return (f"{_OP}: no kernel for prefix {tuple(prefix.shape)}, recurrent state {tuple(rstate.shape)} "
-                f"(covered (hidden, heads, head_dim): {sorted(_SHAPE_HOSTS)})")
-    ws_key = _workspace_key(type(ws))
+    if key is None:
+        return f"{_OP}: prefix {tuple(prefix.shape)}, recurrent state {tuple(rstate.shape)} (2-D, 4-D)"
+    reason = _ROUTES.blocker(key)
+    if reason is not None:
+        return reason
+    ws_key = _ROUTES.owner(type(ws))
     if ws_key is None:
         return f"{_OP}: {type(ws).__name__} is not a kda_mono_workspace"
     if ws_key != key:
         return f"{_OP}: workspace built for {ws_key}, call is {key}"
-    pkg = _shape_host(key)
+    pkg = _ROUTES.package(key)
     h = pkg.host
     s, sl = prefix.size(0), conv_state.size(-1)
     if not 1 <= s <= h.MAX_S:
@@ -145,3 +136,7 @@ def kda_mono_decode_unsupported_reason(ws, layer, prefix, delta, blocks, ares_nw
     if st_idx.dtype != torch.int32 or st_idx.dim() != 2 or st_idx.stride(1) != 1 or num_acc.dtype != torch.int32:
         return f"{_OP}: st_idx {st_idx.dtype} / num_acc {num_acc.dtype} (int32, unit column stride)"
     return None
+
+
+kda_mono_workspace_unsupported_reason = renamed(kda_mono_workspace_blocker, "kda_mono_workspace_unsupported_reason")
+kda_mono_decode_unsupported_reason = renamed(kda_mono_decode_blocker, "kda_mono_decode_unsupported_reason")

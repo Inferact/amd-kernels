@@ -10,6 +10,8 @@ import sys
 import pytest
 import torch
 
+from amd_kernels import routes
+from amd_kernels.decoder import bf16_dense_mlp_common as E
 from amd_kernels.decoder.bf16_dense_mlp_common import host as entry
 
 BF16 = torch.bfloat16
@@ -21,7 +23,7 @@ def meta(*shape, dtype=BF16):
 
 @pytest.fixture(autouse=True)
 def gfx950(monkeypatch):
-    monkeypatch.setattr(entry, "available", lambda: True)
+    monkeypatch.setattr(routes, "available", lambda: True)
 
 
 def _ws(host):
@@ -31,7 +33,7 @@ def _ws(host):
 
 
 def test_table_modules_export_what_the_entry_calls():
-    for name in entry._SHAPE_HOSTS.values():
+    for name in entry._ROUTES.hosts.values():
         host = importlib.import_module(name)
         for attr in ("MlpWorkspace", "dense_mlp", "pack_gate_up", "pack_down", "packed_tiles", "packed_rows_buffer",
                      "MAX_ROWS"):
@@ -39,40 +41,47 @@ def test_table_modules_export_what_the_entry_calls():
 
 
 def test_shapes_are_the_table_keys():
-    assert entry.bf16_dense_mlp_shapes() == frozenset(entry._SHAPE_HOSTS)
+    assert entry.bf16_dense_mlp_shapes() == frozenset(entry._ROUTES.hosts)
+
+
+def test_old_names_are_aliases():
+    for new in ("dense_mlp_workspace_blocker", "bf16_dense_mlp_blocker"):
+        old = new.removesuffix("_blocker") + "_unsupported_reason"
+        assert getattr(E, old).renamed_to == new and getattr(entry, old).renamed_to == new
+        assert getattr(E, new) is getattr(entry, new) and old not in E.__all__
 
 
 def test_reason_signatures():
     sig = inspect.signature
-    assert sig(entry.bf16_dense_mlp_unsupported_reason).parameters == sig(entry.bf16_dense_mlp).parameters
-    assert sig(entry.dense_mlp_workspace_unsupported_reason).parameters == sig(entry.dense_mlp_workspace).parameters
-    for name in entry._SHAPE_HOSTS.values():
+    assert sig(entry.bf16_dense_mlp_blocker).parameters == sig(entry.bf16_dense_mlp).parameters
+    assert sig(entry.dense_mlp_workspace_blocker).parameters == sig(entry.dense_mlp_workspace).parameters
+    assert sig(entry.prepare_dense_mlp_workspace).parameters == sig(entry.dense_mlp_workspace).parameters
+    for name in entry._ROUTES.hosts.values():
         assert list(sig(entry.bf16_dense_mlp).parameters) == \
             list(sig(importlib.import_module(name).dense_mlp).parameters)
 
 
 def test_routes():
-    for key, name in entry._SHAPE_HOSTS.items():
+    for key, name in entry._ROUTES.hosts.items():
         hidden, inter = key
         host = importlib.import_module(name)
         down, gate_up = meta(hidden, inter), meta(2 * inter, hidden)
-        assert entry._shape_host(tuple(down.shape)) is host
-        assert entry._ws_key(host.MlpWorkspace) == key
-        assert entry.dense_mlp_workspace_unsupported_reason("cuda", hidden=hidden, inter=inter) is None
+        assert entry._ROUTES.host(tuple(down.shape)) is host
+        assert entry._ROUTES.owner(host.MlpWorkspace) == key
+        assert entry.dense_mlp_workspace_blocker("cuda", hidden=hidden, inter=inter) is None
         for rows in (1, host.MAX_ROWS):
             tiles = host.packed_tiles(rows)
             assert entry.dense_mlp_packed_tiles(rows, down=down) == tiles
             xp = meta(tiles, hidden // 32, 64, 8)
-            assert entry.bf16_dense_mlp_unsupported_reason(_ws(host), xp, gate_up, down, rows) is None
-            assert entry.bf16_dense_mlp_unsupported_reason(_ws(host), xp, gate_up, down, rows,
-                                                           meta(rows, hidden)) is None
+            assert entry.bf16_dense_mlp_blocker(_ws(host), xp, gate_up, down, rows) is None
+            assert entry.bf16_dense_mlp_blocker(_ws(host), xp, gate_up, down, rows, meta(rows, hidden)) is None
 
 
 def test_reasons(monkeypatch):
-    (key, name), = entry._SHAPE_HOSTS.items()
+    (key, name), = entry._ROUTES.hosts.items()
     hidden, inter = key
     host = importlib.import_module(name)
-    r = entry.bf16_dense_mlp_unsupported_reason
+    r = entry.bf16_dense_mlp_blocker
     ws, down, gate_up = _ws(host), meta(hidden, inter), meta(2 * inter, hidden)
     xp = meta(host.packed_tiles(16), hidden // 32, 64, 8)
     off = meta(hidden, inter * 2)
@@ -81,13 +90,15 @@ def test_reasons(monkeypatch):
     with pytest.raises(ValueError) as e:
         entry.bf16_dense_mlp(ws, xp, gate_up, off, 16)
     assert str(e.value) == reason
-    assert "no kernel" in entry.dense_mlp_workspace_unsupported_reason("cuda", hidden=hidden, inter=inter * 2)
+    assert "no kernel" in entry.dense_mlp_workspace_blocker("cuda", hidden=hidden, inter=inter * 2)
     for f, arg in ((entry.dense_mlp_pack_down, off), (entry.dense_mlp_pack_gate_up, meta(4 * inter, hidden)),
                    (entry.dense_mlp_pack_gate_up, meta(3, hidden))):
         with pytest.raises(ValueError, match="no kernel"):
             f(arg)
     with pytest.raises(ValueError, match="no kernel"):
         entry.dense_mlp_workspace("cuda", hidden=hidden, inter=inter * 2)
+    assert entry.prepare_dense_mlp_workspace("cuda", hidden=hidden, inter=inter * 2) == \
+        entry.dense_mlp_workspace_blocker("cuda", hidden=hidden, inter=inter * 2)
     with pytest.raises(ValueError, match="no kernel"):
         entry.dense_mlp_packed_tiles(16, down=off)
     with pytest.raises(ValueError, match="no kernel"):
@@ -106,14 +117,14 @@ def test_reasons(monkeypatch):
     assert "x_packed must be" in r(ws, meta(xp.shape[0], hidden // 64, 64, 8), gate_up, down, 16)
     assert "x_packed must be" in r(ws, xp.float(), gate_up, down, 16)
     assert "out must be" in r(ws, xp, gate_up, down, 16, meta(16, inter))
-    monkeypatch.setattr(entry, "available", lambda: False)
+    monkeypatch.setattr(routes, "available", lambda: False)
     assert "gfx950" in r(ws, xp, gate_up, down, 16)
-    assert "gfx950" in entry.dense_mlp_workspace_unsupported_reason("cuda", hidden=hidden, inter=inter)
+    assert "gfx950" in entry.dense_mlp_workspace_blocker("cuda", hidden=hidden, inter=inter)
 
 
 def test_import_loads_no_shape_package():
     code = ("import sys; from amd_kernels.decoder.bf16_dense_mlp_common import host as e; "
-            "names = [v.rpartition('.')[0] for v in e._SHAPE_HOSTS.values()]; "
+            "names = [v.rpartition('.')[0] for v in e._ROUTES.hosts.values()]; "
             "print(sorted(n for n in names if n in sys.modules))")
     out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True).stdout
     assert out.strip() == "[]", out

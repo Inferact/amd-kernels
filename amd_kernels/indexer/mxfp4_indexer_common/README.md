@@ -19,7 +19,7 @@ head dim) of `q_payload`; prefill top-k the width of `out`.
 - `available`: gfx950 with FlyDSL, the load-time check before any shape question.
 - `mxfp4_paged_score_topk`, `mxfp4_prefill_score`, `mxfp4_prefill_topk`: the ops, with the package function's
   arguments; a shape off the table raises `ValueError` with the reason.
-- `*_unsupported_reason`: the op's arguments -> None or a one-line reason (host checks only, safe inside graph
+- `*_blocker`: the op's arguments -> None or a one-line reason (host checks only, safe inside graph
   capture); the caller asks once per call and falls back on a reason.
 - `*_shapes`: the covered keys, for a caller that decides at load, before it has activations.
 - `mxfp4_paged_score_topk_kernel`: the routed `amd_kernels.warm_up` entry, for a caller that compiles without
@@ -30,7 +30,7 @@ head dim) of `q_payload`; prefill top-k the width of `out`.
 - `paged_score_topk_reset_counts`: zeroes the ready counts a call uses; needed when a batch has padding sequences.
 - `prefill_topk_workspace_bytes`: the scratch of one top-k call.
 
-Dispatch: `paged._SHAPE_HOSTS`, `prefill._SCORE_HOSTS`, `prefill._TOPK_HOSTS` (module names, imported on first use);
+Dispatch: `paged._ROUTES`, `prefill._SCORE_ROUTES`, `prefill._TOPK_ROUTES` (module names, imported on first use);
 the scratch helpers route by (top-k, page rows) alone.
 
 ## Performance

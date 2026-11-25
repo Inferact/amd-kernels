@@ -24,7 +24,7 @@ def scenario():
     result = {}
     for key in sorted(bf16_dense_mlp_shapes()):
         hidden, inter = key
-        host = entry._shape_host(key)
+        host = entry._ROUTES.host(key)
         ws = dense_mlp_workspace(dev, hidden=hidden, inter=inter)
         gu = dense_mlp_pack_gate_up((torch.randn(2 * inter, hidden, device=dev) * 0.02).bfloat16())
         dn = dense_mlp_pack_down((torch.randn(hidden, inter, device=dev) * 0.03).bfloat16())

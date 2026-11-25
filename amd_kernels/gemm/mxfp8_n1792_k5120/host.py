@@ -80,7 +80,7 @@ def warmup_mxfp8_linear(weight: torch.Tensor, weight_scale: torch.Tensor) -> Non
     torch.cuda.synchronize(dev)
 
 
-# The folder's protocol with ``gemm.mxfp8_common`` (``gemm._SHAPE_HOSTS``): its common-kernel rows, and its own
+# The folder's protocol with ``gemm.mxfp8_common`` (``gemm._ROUTES``): its common-kernel rows, and its own
 # entries for the row counts its table covers.
 ROWS = {
     (N, K, "bf16"): tuple(

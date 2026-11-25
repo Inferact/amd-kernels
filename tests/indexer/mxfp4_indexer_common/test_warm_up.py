@@ -101,9 +101,9 @@ def routed_entries():
 
     from amd_kernels.indexer.mxfp4_indexer_common import paged, prefill
 
-    return [importlib.import_module(m).mxfp4_paged_score_topk for m in paged._SHAPE_HOSTS.values()] + [
-        importlib.import_module(m).score_rows for m in prefill._SCORE_HOSTS.values()] + [
-        importlib.import_module(m).topk_rows for m in prefill._TOPK_HOSTS.values()]
+    return [importlib.import_module(m).mxfp4_paged_score_topk for m in paged._ROUTES.hosts.values()] + [
+        importlib.import_module(m).score_rows for m in prefill._SCORE_ROUTES.hosts.values()] + [
+        importlib.import_module(m).topk_rows for m in prefill._TOPK_ROUTES.hosts.values()]
 
 
 def test_warm_up_walk_and_graph(tmp_path):

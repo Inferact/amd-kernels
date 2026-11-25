@@ -13,6 +13,8 @@ import pytest
 import torch
 import torch.distributed as dist
 
+from amd_kernels import routes
+from amd_kernels.collectives import topk_gather_merge_common as E
 from amd_kernels.collectives.topk_gather_merge_common import host
 
 K = 2048
@@ -30,12 +32,12 @@ def group():
 
 @pytest.fixture
 def on_gfx950(monkeypatch):
-    monkeypatch.setattr(host, "available", lambda: True)
+    monkeypatch.setattr(routes, "available", lambda: True)
 
 
 def fake_comm(key=(K, 8), closed=False):
     """A communicator object of the routed class without the collective construction."""
-    cls = importlib.import_module(host._SHAPE_HOSTS[key]).TopkGatherMerge
+    cls = importlib.import_module(host._ROUTES.hosts[key]).TopkGatherMerge
     comm = object.__new__(cls)
     comm.closed, comm.device = closed, torch.device("meta")
     return comm
@@ -48,50 +50,59 @@ def call_args(rows=12, topk=K, blocks=64):
 
 
 def test_table_imports_and_exports():
-    for (topk, world), name in host._SHAPE_HOSTS.items():
+    for (topk, world), name in host._ROUTES.hosts.items():
         mod = importlib.import_module(name)
         assert {"rank", "group", "device"} <= set(inspect.signature(mod.TopkGatherMerge).parameters)
         assert callable(mod.TopkGatherMerge.warmup) and callable(mod.TopkGatherMerge.close)
         assert mod.host.MAX_ROWS >= 1 and mod.kernel.K == topk and mod.kernel.WORLD == world
-    assert host.topk_gather_merge_shapes() == frozenset(host._SHAPE_HOSTS)
+    assert host.topk_gather_merge_shapes() == frozenset(host._ROUTES.hosts)
 
 
 def test_call_reason_takes_the_call_arguments():
-    params = list(inspect.signature(host.topk_gather_merge_unsupported_reason).parameters)
-    call = importlib.import_module(host._SHAPE_HOSTS[(K, 8)]).TopkGatherMerge.__call__
+    params = list(inspect.signature(host.topk_gather_merge_blocker).parameters)
+    call = importlib.import_module(host._ROUTES.hosts[(K, 8)]).TopkGatherMerge.__call__
     assert params == ["comm"] + list(inspect.signature(call).parameters)[1:]
-    assert inspect.signature(host.topk_gather_merge_comm).parameters == inspect.signature(
-        host.topk_gather_merge_comm_unsupported_reason).parameters
+    params = inspect.signature(host.topk_gather_merge_comm).parameters
+    assert params == inspect.signature(host.topk_gather_merge_comm_blocker).parameters
+    assert params == inspect.signature(host.prepare_topk_gather_merge_comm).parameters
+
+
+def test_old_names_are_aliases():
+    for new in ("topk_gather_merge_comm_blocker", "topk_gather_merge_blocker"):
+        old = new.removesuffix("_blocker") + "_unsupported_reason"
+        assert getattr(E, old).renamed_to == new and getattr(host, old).renamed_to == new
+        assert getattr(E, new) is getattr(host, new) and old not in E.__all__
 
 
 def test_factory_off_table(group, on_gfx950):
-    why = host.topk_gather_merge_comm_unsupported_reason(0, group, "cpu", topk=K)
-    assert why == f"topk_gather_merge_comm: no kernel for topk={K}, world=1 (covered: ({K}, 8))"
+    why = host.topk_gather_merge_comm_blocker(0, group, "cpu", topk=K)
+    assert why == f"topk_gather_merge_comm: no kernel for topk={K}, world=1 (covered: [({K}, 8)])"
     with pytest.raises(ValueError) as err:
         host.topk_gather_merge_comm(0, group, "cpu", topk=K)
     assert str(err.value) == why
-    assert "topk=1024, world=1" in host.topk_gather_merge_comm_unsupported_reason(0, group, "cpu", topk=1024)
+    assert host.prepare_topk_gather_merge_comm(0, group, "cpu", topk=K) == why
+    assert "topk=1024, world=1" in host.topk_gather_merge_comm_blocker(0, group, "cpu", topk=1024)
 
 
 def test_factory_rank_and_platform(group, monkeypatch):
-    monkeypatch.setattr(host, "_SHAPE_HOSTS", {(K, 1): host._SHAPE_HOSTS[(K, 8)]})
-    monkeypatch.setattr(host, "available", lambda: True)
-    assert host.topk_gather_merge_comm_unsupported_reason(0, group, "cpu", topk=K) is None
-    assert "rank 3 is not" in host.topk_gather_merge_comm_unsupported_reason(3, group, "cpu", topk=K)
+    monkeypatch.setitem(host._ROUTES.hosts, (K, 1), host._ROUTES.hosts[(K, 8)])
+    monkeypatch.setattr(routes, "available", lambda: True)
+    assert host.topk_gather_merge_comm_blocker(0, group, "cpu", topk=K) is None
+    assert "rank 3 is not" in host.topk_gather_merge_comm_blocker(3, group, "cpu", topk=K)
     monkeypatch.setattr(dist, "is_initialized", lambda: False)
-    why = host.topk_gather_merge_comm_unsupported_reason(0, None, "cpu", topk=K)
+    why = host.topk_gather_merge_comm_blocker(0, None, "cpu", topk=K)
     assert why == "topk_gather_merge_comm: torch.distributed is not initialized"
-    monkeypatch.setattr(host, "available", lambda: False)
-    why = host.topk_gather_merge_comm_unsupported_reason(0, group, "cpu", topk=K)
+    monkeypatch.setattr(routes, "available", lambda: False)
+    why = host.topk_gather_merge_comm_blocker(0, group, "cpu", topk=K)
     assert why == "topk_gather_merge_comm: needs gfx950 with FlyDSL"
 
 
 def test_call_reason_branches():
     comm = fake_comm()
     a = call_args()
-    assert host.topk_gather_merge_unsupported_reason(comm, **a) is None
-    assert host.topk_gather_merge_unsupported_reason(comm, **call_args(rows=1)) is None
-    assert host.topk_gather_merge_unsupported_reason(comm, **call_args(rows=256)) is None
+    assert host.topk_gather_merge_blocker(comm, **a) is None
+    assert host.topk_gather_merge_blocker(comm, **call_args(rows=1)) is None
+    assert host.topk_gather_merge_blocker(comm, **call_args(rows=256)) is None
     z = lambda *s, dtype=torch.int32: torch.empty(*s, dtype=dtype, device="meta")  # noqa: E731
     cases = [
         (object(), a, "object is not a communicator of this entry"),
@@ -113,7 +124,7 @@ def test_call_reason_branches():
         (comm, {**a, "block_table": torch.empty(12, 64, dtype=torch.int32)}, "communicator's device"),
     ]
     for c, args, want in cases:
-        why = host.topk_gather_merge_unsupported_reason(c, **args)
+        why = host.topk_gather_merge_blocker(c, **args)
         assert why is not None and why.startswith("topk_gather_merge: ") and want in why, (want, why)
 
 
