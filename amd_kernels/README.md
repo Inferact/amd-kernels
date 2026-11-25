@@ -176,6 +176,7 @@ falls back), `<op>_shapes()` the covered shape keys.
 - [`attention/kda_decode_fb_gate_spec_h12_d128`](attention/kda_decode_fb_gate_spec_h12_d128/README.md): the
   linear-attention (KDA) spec-verify decode: f_b gate GEMM, conv + SiLU, delta rule with per-token state snapshots and
   the gated RMSNorm in one launch.
+- [`attention/kda_verify_rmsnorm_h12_d128`](attention/kda_verify_rmsnorm_h12_d128/README.md) fuses post-convolution speculative verification, compact recovery records and gated RMSNorm.
 - [`attention/kda_prefill_h12_d128`](attention/kda_prefill_h12_d128/README.md): the linear-attention (KDA) chunked
   prefill: conv + SiLU, gate and q / k norms, the chunk-group delta-rule scan with fp32 recurrent states, the gated
   RMSNorm (one launch for short batches, staged launches for long ones).

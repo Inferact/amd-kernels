@@ -13,6 +13,7 @@ from .mono import (
     kda_mono_workspace_unsupported_reason,
 )
 from .prefill import kda_prefill, kda_prefill_chunk_table, kda_prefill_shapes, kda_prefill_unsupported_reason
+from .verify import kda_verify_rmsnorm, kda_verify_rmsnorm_shapes, kda_verify_rmsnorm_unsupported_reason
 
 __all__ = [
     "available",
@@ -28,4 +29,7 @@ __all__ = [
     "kda_prefill_chunk_table",
     "kda_prefill_shapes",
     "kda_prefill_unsupported_reason",
+    "kda_verify_rmsnorm",
+    "kda_verify_rmsnorm_shapes",
+    "kda_verify_rmsnorm_unsupported_reason",
 ]
