@@ -17,6 +17,8 @@ summed in source order in fp32 (multiplies and adds, not fused), rounded once. E
 word after reading the counter; one extra workgroup (dispatched last) waits for every start word and then bumps the
 counter, so a CUDA graph replays with no host state and the row count may change between calls. A slot is rewritten
 two calls later, after every peer's flags of the call in between, which it sets after its own previous call finished.
+A call also stores ``seq`` into the flag and start words of the tiles and workgroups it does not use, so no word lags
+the counter by more than one call and the wrapping 32-bit differences ``word - seq`` stay exact however long it runs.
 
 Control block (int32 words): flags [0, 8 * MAX_TILES), counter SEQ_WORD, start words START_WORD + workgroup.
 """
@@ -127,9 +129,11 @@ def compile_combine():
                 buffer_ops.buffer_store(vals[p], dst, (e < n_dw).select(dst0 + e, fx.Int32(OOB)), cache_modifier=SYS)
             fx.rocdl.s_waitcnt(vmcnt=0)
             fx.gpu.barrier()
+            fr = buffer_ops.create_buffer_resource_from_addr(fx.Int64(tab[WORLD + d]), num_records_bytes=CTL_BYTES)
             if tx == 0:
-                fr = buffer_ops.create_buffer_resource_from_addr(fx.Int64(tab[WORLD + d]), num_records_bytes=CTL_BYTES)
                 buffer_ops.buffer_store(seq, fr, FLAG_WORD + i32_rank * MAX_TILES + t, cache_modifier=SYS)
+            if (t == 0) & (tx >= tiles) & (tx < MAX_TILES):
+                buffer_ops.buffer_store(seq, fr, FLAG_WORD + i32_rank * MAX_TILES + tx, cache_modifier=SYS)
 
         if bid == last:
             seq = read_seq()
@@ -152,6 +156,10 @@ def compile_combine():
                         | ((wid + 2 < last) & ((fv[2] - seq) < 0))
                         | ((wid + 3 < last) & ((fv[3] - seq) < 0))
                     )
+            for k in range_constexpr(-(-(WORLD + GROUPS) * MAX_TILES // NT)):
+                wid = tx + k * NT
+                if (wid >= last) & (wid < (WORLD + GROUPS) * MAX_TILES):
+                    buffer_ops.buffer_store(seq, ctl, START_WORD + wid, cache_modifier=SYS)
             fx.gpu.barrier()
             if tx == 0:
                 buffer_ops.buffer_store(seq, ctl, SEQ_WORD, cache_modifier=SYS)

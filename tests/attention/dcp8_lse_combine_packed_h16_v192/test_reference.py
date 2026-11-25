@@ -1,12 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the amd-kernels project
-"""reference.py against vLLM's unpack-combine on one GPU (skipped without vLLM)."""
+"""reference.py and the copy in triton_combine.py against vLLM's unpack-combine on one GPU (skipped without vLLM)."""
 import pytest
 import torch
 
 from amd_kernels.attention.dcp8_lse_combine_packed_h16_v192.reference import combine_reference
 
-from .common import has_vllm, make_sends, vllm_combine
+from .common import has_vllm, make_sends, triton_combine, vllm_combine
 
 
 @pytest.mark.skipif(not has_vllm(), reason="vLLM is not installed")
@@ -19,3 +19,12 @@ def test_reference_matches_vllm(t):
         got = combine_reference(sends, rank).float()
         assert not got.isnan().any()
         assert (got - want).abs().max().item() <= want.abs().max().item() * 2**-7
+
+
+@pytest.mark.skipif(not has_vllm(), reason="vLLM is not installed")
+@pytest.mark.parametrize("t", [1, 17, 288])
+def test_copy_matches_vllm(t):
+    dev = torch.device("cuda", 0)
+    sends = make_sends(t, 1, dev, empty_ranks=(2,))
+    for rank in (0, 7):
+        assert torch.equal(triton_combine(sends, rank).view(torch.int16), vllm_combine(sends, rank).view(torch.int16))

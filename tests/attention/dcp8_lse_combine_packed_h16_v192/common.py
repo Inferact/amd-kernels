@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the amd-kernels project
-"""Send buffers of all 8 ranks and vLLM's unpack-combine (when vLLM is installed) for the tests and the benchmark."""
+"""Send buffers of all 8 ranks and vLLM's unpack-combine (installed, or its copy in triton_combine.py) for the tests
+and the benchmark."""
 import torch
 
 from amd_kernels.attention.dcp8_lse_combine_packed_h16_v192.reference import D, PACK, SUB, WORLD
@@ -43,9 +44,29 @@ def vllm_combine(sends, rank):
     return out.view(t, 16, 192)
 
 
+def triton_combine(sends, rank):
+    """``vllm_combine`` with the copy of vLLM's kernel in triton_combine.py."""
+    from .triton_combine import unpack_combine_kernel
+
+    recv = torch.stack([s[rank] for s in sends])
+    t = recv.shape[1]
+    out = torch.empty((t, SUB, D), dtype=torch.bfloat16, device=recv.device)
+    unpack_combine_kernel[(t, SUB)](recv, out, *recv.stride(), *out.stride(), N=WORLD, HEAD_DIM=D)
+    return out.view(t, 16, 192)
+
+
+def exact_combine(sends, rank):
+    """The combine the kernel matches bit for bit: vLLM's when installed, else its copy."""
+    return (vllm_combine if has_vllm() else triton_combine)(sends, rank)
+
+
 def has_vllm():
     try:
         from vllm.v1.attention.ops.dcp import _dcp_a2a_unpack_combine_kernel  # noqa: F401
     except Exception:
         return False
     return True
+
+
+def exact_name():
+    return "vLLM" if has_vllm() else "the copy of vLLM's kernel"

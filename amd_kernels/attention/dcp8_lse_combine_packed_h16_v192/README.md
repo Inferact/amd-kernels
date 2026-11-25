@@ -46,7 +46,7 @@ every T. Below 32 rows both paths sit at the per-call cross-rank handshake (~13 
 ## Tests
 
 ```bash
-python3 -m pytest tests/attention/dcp8_lse_combine_packed_h16_v192 -q                    # 8 GPUs (+ vLLM for bit-exact)
+python3 -m pytest tests/attention/dcp8_lse_combine_packed_h16_v192 -q                    # 8 GPUs, bit-exact vs vLLM or its copy
 AKR_COMPILE_ONLY=1 python3 -m pytest tests/attention/dcp8_lse_combine_packed_h16_v192/test_compile.py -q   # 1 GPU
 python3 benchmarks/attention/dcp8_lse_combine_packed_h16_v192/benchmark_combine.py                 # 8 GPUs
 ```
