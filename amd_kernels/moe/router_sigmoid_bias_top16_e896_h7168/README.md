@@ -26,6 +26,8 @@ at a time per stream (the workspace holds the epoch words); CUDA-graph safe, no 
 The dispatch (16-row tile -> K splits, column waves, row splits) is `CONFIG_BY_MT` in `host.py`; the hand-off between
 the GEMM and the top-16 is in the module docstring of `kernel.py`.
 
+For prefill, `prefill_top16_mxfp4(logits, latent, bias, routed_scaling_factor, valid_rows)` consumes existing projections, up to 4096 rows. One launch selects routes and packs the 3584-column latent to MXFP4. FP32 latent rounds to BF16 before quantization. Both independent projections and aligned slices of a combined projection are supported. Padding has zero weights and IDs of -1. The quant output includes every input row. Call once with each latent dtype before graph capture.
+
 ## Performance
 MI355X, graph, cold W (24 copies), min of 15, us (`benchmark_router.py`; launch floor 1.73). stock = hipBLASLt mm + AITER.
 `skel` = the same kernel with no MFMAs and no top-16 (the measured critical path of the hand-off), `stream` = the weight
@@ -50,4 +52,5 @@ every column tile) remain.
 ```bash
 python3 -m pytest tests/moe/router_sigmoid_bias_top16_e896_h7168 -q
 python3 benchmarks/moe/router_sigmoid_bias_top16_e896_h7168/benchmark_router.py [M ...]
+python3 benchmarks/moe/router_sigmoid_bias_top16_e896_h7168/benchmark_prefill.py [--packed]
 ```

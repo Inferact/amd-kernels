@@ -109,6 +109,7 @@ falls back), `<op>_shapes()` the covered shape keys.
   experts, top 3, H 5120 I 2304.
 - [`moe/fused_ep_mxfp4_h5120_i2304_e48_top6_ranks8`](moe/fused_ep_mxfp4_h5120_i2304_e48_top6_ranks8/README.md):
   one-launch expert-parallel MoE on eight ranks: dispatch, experts, combine.
+- [`moe/fused_ep_mxfp4_h3584_i3072_e112_top16_ranks8`](moe/fused_ep_mxfp4_h3584_i3072_e112_top16_ranks8/README.md): EP8 top-16 routed experts with SiTUv2, H 3584 and I 3072.
 - [`moe/router_sqrtsoftplus_top6_h5120_e384`](moe/router_sqrtsoftplus_top6_h5120_e384/README.md): router: gate GEMM
   and biased sqrt-softplus top-6 of 384 experts.
 - [`moe/router_sqrtsoftplus_top3_h5120_e128`](moe/router_sqrtsoftplus_top3_h5120_e128/README.md): router: gate GEMM
@@ -119,7 +120,7 @@ falls back), `<op>_shapes()` the covered shape keys.
 - [`moe/mxfp4_h3584_i3072_e896_top16`](moe/mxfp4_h3584_i3072_e896_top16/README.md): routed MXFP4 experts (A4W4, SiTUv2)
   of one TP8 rank: activation quant, GEMM1 + GEMM2 in one launch, deterministic top-16 sum.
 - [`moe/router_sigmoid_bias_top16_e896_h7168`](moe/router_sigmoid_bias_top16_e896_h7168/README.md): the MoE router,
-  bf16 gate GEMM + sigmoid + correction bias + top-16 + renormalisation, two launches.
+  bf16 gate GEMM + sigmoid + correction bias + top-16 + renormalisation. Prefill can pair selection with MXFP4 latent quantization.
 - [`moe/allreduce_latent_rmsnorm_up_proj_h3584_n896_ranks8`](moe/allreduce_latent_rmsnorm_up_proj_h3584_n896_ranks8/README.md):
   the MoE tail on eight ranks: latent all-reduce + RMSNorm + the hidden-shard up projection of the shared output.
 - [`moe/layer_tail_k2_h7168_ranks8`](moe/layer_tail_k2_h7168_ranks8/README.md): one decode layer's whole tail in one
