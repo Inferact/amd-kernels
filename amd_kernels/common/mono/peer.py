@@ -112,4 +112,3 @@ def tp_agree(ok: bool, group) -> bool:
     flag = torch.tensor([int(ok)], dtype=torch.int32)
     dist.all_reduce(flag, op=dist.ReduceOp.MIN, group=group)
     return bool(flag.item())
-
