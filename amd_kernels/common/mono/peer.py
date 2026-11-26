@@ -79,6 +79,7 @@ class PeerBuffer:
                     " TP rank"
                 ) from failure
         self.addresses = torch.tensor(addresses, dtype=torch.int64, device=device)
+        self.host_addresses = tuple(addresses)
 
     def close(self) -> None:
         """Close the peer mappings and free the local buffer; idempotent. Only once no
@@ -90,6 +91,7 @@ class PeerBuffer:
             self.bytes = None
             self._heap.free_device_mem(self.local)
             self.local = 0
+        self.host_addresses = ()
 
 
 # Decisions every TP rank must take alike.

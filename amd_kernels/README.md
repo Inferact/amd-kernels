@@ -340,3 +340,5 @@ falls back), `<op>_shapes()` the covered shape keys.
 - [`compile_watch.py`](compile_watch.py): reports a compile after the warm-ups.
 - [`common/`](common/): buffer ops, launch helpers, the AITER GEMM's XCD swizzle, the HIP runtime binding, the
   eight-rank flag helpers (`rank8_signal.py`, `rank8_comm.py`) and the persistent-kernel building blocks (`mono/`).
+
+- `attention.dcp8_context_gather_mla_idx`: eight-rank direct peer gather for MLA and indexer context rows.
